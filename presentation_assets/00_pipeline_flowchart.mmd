@@ -1,0 +1,16 @@
+flowchart LR
+    A[Staff uploads photo/PDF] --> B[Local preprocessing: deskew, denoise, enhance]
+    B --> C[EasyOCR extracts text and word boxes]
+    C --> D[Handwriting layer]
+    D --> D1[Current: EasyOCR baseline]
+    D --> D2[Upgrade: Qwen2.5-VL via MLX-VLM]
+    D --> D3[Upgrade: PaddleOCR PP-OCRv5]
+    D1 --> E[Profile-aware redaction]
+    D2 --> E
+    D3 --> E
+    E --> F[Opaque image masks + redacted text]
+    F --> G[Translation if non-English]
+    G --> H[Classify category + route department]
+    H --> I[Urgency, sentiment, safeguarding flags]
+    I --> J[Audit log + outputs: image, TXT, JSON, DOCX]
+    J --> K[Staff approve or send to review]
