@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/venv/
+env/
+venv/
+ENV/
+
+# Data & uploads
+backend/data/uploads/
+backend/data/processed/
+backend/data/*.sqlite3
+backend/data/demo_docs/
+data/uploads/
+data/processed/
+data/*.sqlite3
+*.db
+
+# Node
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Flutter
+mobile/.dart_tool/
+mobile/.packages
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Evaluation datasets & results (large image files)
+backend/evaluation/datasets/
+backend/evaluation_results/
+
+# PaddleOCR model cache
+.paddlex/
+
+# Model cache
+models/
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Local env files
+backend/.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/

@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+}
+
+@layer components {
+  /* Progress bar with smooth animation */
+  .progress-bar {
+    @apply h-3 w-full rounded-full bg-slate-200 overflow-hidden;
+  }
+  .progress-bar-fill {
+    @apply h-full rounded-full bg-blue-500 transition-all duration-500 ease-out;
+  }
+
+  /* Status badges */
+  .status-badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide uppercase;
+  }
+  .status-badge--processing {
+    @apply bg-blue-100 text-blue-800;
+  }
+  .status-badge--complete {
+    @apply bg-emerald-100 text-emerald-800;
+  }
+  .status-badge--needs_review {
+    @apply bg-amber-100 text-amber-800;
+  }
+  .status-badge--error {
+    @apply bg-red-100 text-red-800;
+  }
+  .status-badge--uploaded {
+    @apply bg-slate-100 text-slate-600;
+  }
+  .status-badge--preprocessing {
+    @apply bg-blue-100 text-blue-800;
+  }
+  .status-badge--ocr {
+    @apply bg-indigo-100 text-indigo-800;
+  }
+  .status-badge--redaction {
+    @apply bg-pink-100 text-pink-800;
+  }
+  .status-badge--translation {
+    @apply bg-cyan-100 text-cyan-800;
+  }
+  .status-badge--classification {
+    @apply bg-violet-100 text-violet-800;
+  }
+  .status-badge--routing {
+    @apply bg-orange-100 text-orange-800;
+  }
+
+  /* Redaction overlay */
+  .redaction-overlay {
+    @apply absolute bg-red-500 bg-opacity-40 border-2 border-red-600 border-opacity-60 rounded-sm;
+  }
+
+  /* Tap targets for mobile */
+  .tap-target {
+    @apply min-h-[44px] min-w-[44px];
+  }
+
+  /* Card styles */
+  .council-card {
+    @apply bg-white rounded-xl shadow-sm border border-slate-200 p-4;
+  }
+
+  /* Screen container */
+  .screen-container {
+    @apply w-full max-w-3xl mx-auto px-4 py-4 pb-24;
+  }
+
+  /* Confidence colors for text */
+  .confidence-high {
+    @apply text-emerald-700 bg-emerald-50 px-0.5 rounded;
+  }
+  .confidence-medium {
+    @apply text-amber-700 bg-amber-50 px-0.5 rounded;
+  }
+  .confidence-low {
+    @apply text-red-700 bg-red-50 px-0.5 rounded;
+  }
+}
+
+@layer utilities {
+  .animate-pulse-slow {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
