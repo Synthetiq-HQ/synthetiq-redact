@@ -47,6 +47,10 @@ Thumbs.db
 # Evaluation datasets & results (large image files)
 backend/evaluation/datasets/
 backend/evaluation_results/
+backend/training/datasets/*
+!backend/training/datasets/.gitkeep
+backend/training/models/
+backend/training/exports/
 
 # PaddleOCR model cache
 .paddlex/

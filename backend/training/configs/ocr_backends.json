@@ -1,0 +1,19 @@
+{
+  "backends": ["easyocr", "paddleocr", "surya", "trocr"],
+  "easyocr": {
+    "languages": ["en"],
+    "gpu": true
+  },
+  "paddleocr": {
+    "language": "en",
+    "use_angle_cls": true
+  },
+  "surya": {
+    "enabled_when_installed": true
+  },
+  "trocr": {
+    "model_path": "",
+    "processor_path": "",
+    "device": "cuda"
+  }
+}

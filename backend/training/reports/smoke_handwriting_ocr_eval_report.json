@@ -1,0 +1,23 @@
+{
+  "predictions": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\backend\\training\\reports\\smoke_baseline_ocr_predictions.jsonl",
+  "metrics": {
+    "cer": "character error rate, lower is better",
+    "wer": "word error rate, lower is better",
+    "field_level_recall": "share of expected answer-key field values found in OCR text",
+    "pii_recall": "share of expected PII values found in OCR text",
+    "critical_pii_false_negative_count": "critical PII values missing from OCR output",
+    "redaction_box_mapping_success": "expected PII boxes matched by OCR word boxes at IoU threshold",
+    "low_confidence_review_trigger_accuracy": "whether low confidence would send risky rows to review"
+  },
+  "targets": {
+    "first_fake_council_cer_goal": 0.12,
+    "critical_pii_recall_before_real_pilot": 0.99,
+    "handwriting_auto_release_during_pilot": false
+  },
+  "backends": {
+    "none": {
+      "status": "no_predictions",
+      "rows": 0
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "manifest": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\backend\\training\\datasets\\smoke_synthetic\\manifest.jsonl",
+  "rows_requested": 5,
+  "backends": {
+    "easyocr": {
+      "status": "skipped",
+      "reason": "EasyOCR not installed: No module named 'easyocr'"
+    },
+    "paddleocr": {
+      "status": "skipped",
+      "reason": "PaddleOCR not installed: No module named 'paddleocr'"
+    },
+    "surya": {
+      "status": "skipped",
+      "reason": "Surya not installed: No module named 'surya'"
+    },
+    "trocr": {
+      "status": "skipped",
+      "reason": "TrOCR skipped because --trocr-model was not supplied."
+    }
+  },
+  "predictions": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\backend\\training\\reports\\smoke_baseline_ocr_predictions.jsonl"
+}
