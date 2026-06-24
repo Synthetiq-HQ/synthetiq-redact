@@ -266,6 +266,11 @@ FIELD_LABEL_PATTERNS: Dict[str, re.Pattern] = {
         r"(?:Vehicle\s+Reg(?:istration)?|VRM|Registration)\s*[:\-]?\s+",
         re.IGNORECASE,
     ),
+    "council_ref": re.compile(
+        r"(?<!\w)(?:Council\s+Reference|Council\s+Ref|Case\s+Reference|Case\s+Ref|"
+        r"Counc\W+reference)\b(?:\s*[:\-=]\s*|\s+)",
+        re.IGNORECASE,
+    ),
     "school": re.compile(
         r"(?:^|\n)\s*School\s*[:\-]?\s+",
         re.IGNORECASE,
@@ -276,7 +281,7 @@ FIELD_LABEL_PATTERNS: Dict[str, re.Pattern] = {
     ),
     # Notes redacted only when category profile includes "notes"
     "notes": re.compile(
-        r"Notes\s*[:\-]?\s+",
+        r"(?:^|\n)\s*Notes\s*[:\-]?\s+",
         re.IGNORECASE,
     ),
 }
@@ -292,6 +297,7 @@ _FIELD_VALUE_MAX: Dict[str, int] = {
     "pcn": 22,
     "school": 90,
     "nhs_number": 20,
+    "council_ref": 40,
 }
 _FIELD_VALUE_DEFAULT_MAX = 60
 
@@ -396,6 +402,48 @@ _HARDSHIP_NOTE_RE = re.compile(
     r"\b(?:cannot\s+afford|can't\s+afford|no\s+money|food\s+bank|homeless|"
     r"eviction|starving|desperate|unsafe\s+at\s+home|feels\s+unsafe)\b",
     re.IGNORECASE,
+)
+
+_GENERIC_LABEL_LINE_RE = re.compile(
+    r"^\s*[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ' /-]{1,40}\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
+
+_SIGNOFF_RE = re.compile(
+    r"^(?:yours\s+(?:faithfully|sincerely)|kind\s+regards|regards|"
+    r"sincerely|signed)\b",
+    re.IGNORECASE,
+)
+
+_TITLE_NAME_CONTEXT_RE = re.compile(
+    r"(?:^|(?:dear|re|regarding|patient|applicant|requester|child|parent|"
+    r"carer|reported\s+by|full\s+name|name)\s*[:,-]?\s*)$",
+    re.IGNORECASE,
+)
+
+_DEPENDENT_RELATION_NAME_RE = re.compile(
+    r"\b(?i:(?:my|our|the)\s+"
+    r"(?:son|daughter|child|children|stepson|stepdaughter|foster\s+child|"
+    r"grandson|granddaughter))\s*,?\s+"
+    r"(?P<name>[A-Z][a-zA-Z'-]{1,24}(?:\s+[A-Z][a-zA-Z'-]{1,24}){1,2})"
+    r"(?=\s*(?:[,.;:]|[-_=]*\s*(?:age|aged|is|has|had|was|who)\b|$))"
+)
+
+_DEPENDENT_NAME_STOP_WORDS = {
+    "age", "aged", "has", "had", "is", "was", "were", "who", "with",
+    "asthma", "breathing", "medical", "condition", "son", "daughter",
+    "child", "children",
+}
+
+_DEPENDENT_RELATION_RE = (
+    r"(?i:(?:my|our|the)\s+"
+    r"(?:son|daughter|child|children|stepson|stepdaughter|foster\s+child|"
+    r"grandson|granddaughter))"
+)
+
+_DEPENDENT_AGE_RE = re.compile(
+    rf"\b{_DEPENDENT_RELATION_RE}\b.{{0,90}}?"
+    r"(?P<age>\bage[d]?\s*[,;:]?\s*(?:\d{1,2}|[Il])\b)"
 )
 
 
@@ -583,7 +631,9 @@ class RedactionEngine:
         )
         for match in pattern.finditer(text):
             name = match.group(2)
-            if len(name) >= 2:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            prefix = text[line_start:match.start()].strip()
+            if len(name) >= 2 and _TITLE_NAME_CONTEXT_RE.search(prefix):
                 spans.append({
                     "type": "person_name",
                     "start": match.start(),
@@ -592,6 +642,48 @@ class RedactionEngine:
                     "confidence": 0.85,
                     "method": "titled_name",
                 })
+        return spans
+
+    def detect_dependent_names(self, text: str) -> list[dict[str, Any]]:
+        """
+        Detect child/dependent names in phrases such as:
+        "My son, Adam Rahman, age 9..." or "Our daughter Priya Shah has...".
+        """
+        spans: list[dict[str, Any]] = []
+        for match in _DEPENDENT_RELATION_NAME_RE.finditer(text):
+            value = match.group("name").strip(" ,.;:-_=|")
+            words = value.split()
+            if len(words) < 2:
+                continue
+            if any(word.lower().strip(".,;:-_=|") in _DEPENDENT_NAME_STOP_WORDS for word in words):
+                continue
+            if not any(ch.isalpha() for ch in value):
+                continue
+            spans.append({
+                "type": "person_name",
+                "start": match.start("name"),
+                "end": match.start("name") + len(value),
+                "value": value,
+                "confidence": 0.84,
+                "method": "dependent_name",
+            })
+        return spans
+
+    def detect_dependent_ages(self, text: str) -> list[dict[str, Any]]:
+        """Detect child/dependent age phrases such as 'age 9'."""
+        spans: list[dict[str, Any]] = []
+        for match in _DEPENDENT_AGE_RE.finditer(text):
+            value = match.group("age").strip(" ,.;:-_=|")
+            if len(value) < 4:
+                continue
+            spans.append({
+                "type": "child_age",
+                "start": match.start("age"),
+                "end": match.start("age") + len(value),
+                "value": value,
+                "confidence": 0.84,
+                "method": "dependent_age",
+            })
         return spans
 
     def detect_standalone_names(self, text: str) -> list[dict[str, Any]]:
@@ -603,6 +695,7 @@ class RedactionEngine:
         spans: list[dict[str, Any]] = []
         lines = text.splitlines()
         offset = 0
+        previous_nonempty = ""
         for raw_line in lines:
             line = raw_line.strip()
             line_start = offset + (len(raw_line) - len(raw_line.lstrip()))
@@ -612,10 +705,17 @@ class RedactionEngine:
             if not line:
                 continue
 
+            has_signature_context = bool(_SIGNOFF_RE.search(previous_nonempty))
+            previous_nonempty = line
+
             # Skip lines with digits, labels, or short words
             if any(char.isdigit() for char in line):
                 continue
             if _ANY_LABEL_PATTERN.search(line):
+                continue
+            if _GENERIC_LABEL_LINE_RE.search(line):
+                continue
+            if not has_signature_context:
                 continue
             if len(line) < 4 or len(line) > 40:
                 continue
@@ -740,6 +840,14 @@ class RedactionEngine:
 
         # --- 0c. Aggressive name detection for free-text / handwriting ---
         for ns in self.detect_titled_names(text):
+            if not any(s["start"] < ns["end"] and s["end"] > ns["start"] for s in spans):
+                spans.append(ns)
+
+        for ns in self.detect_dependent_names(text):
+            if not any(s["start"] < ns["end"] and s["end"] > ns["start"] for s in spans):
+                spans.append(ns)
+
+        for ns in self.detect_dependent_ages(text):
             if not any(s["start"] < ns["end"] and s["end"] > ns["start"] for s in spans):
                 spans.append(ns)
 
@@ -894,6 +1002,25 @@ class RedactionEngine:
 
             if not word_indices:
                 continue
+
+            if (
+                span.get("method") == "field_label"
+                and span.get("type") not in {"address", "notes", "signature"}
+            ):
+                first_word = ocr_words[min(word_indices)]
+                first_ys = [p[1] for p in first_word["bbox"]]
+                first_yc = (min(first_ys) + max(first_ys)) / 2
+                first_height = max(first_ys) - min(first_ys)
+                same_line_tol = max(first_height * 0.75, 8)
+
+                def _same_visual_line(word_index: int) -> bool:
+                    ys = [p[1] for p in ocr_words[word_index]["bbox"]]
+                    yc = (min(ys) + max(ys)) / 2
+                    return abs(yc - first_yc) <= same_line_tol
+
+                word_indices = {wi for wi in word_indices if _same_visual_line(wi)}
+                if not word_indices:
+                    continue
 
             bboxes = []
             for wi in sorted(word_indices):
@@ -1120,12 +1247,12 @@ class RedactionEngine:
         When avg OCR confidence < 0.75, text-span mapping is unreliable.
         This pass works directly on image coordinates:
 
-        1. Header block  — everything above the "Date:" line is sender PII
-                           (name, address, email, phone written before the date)
+        1. Header/contact lines — likely sender name/address/contact details are
+                           masked line by line, never as a page-wide block
         2. Label-triggered line redaction — detects label keywords in OCR
                            block text; redacts the rest of that line
-        3. Closing / signature region — detects "Yours faithfully / sincerely /
-                           regards" and blacks out from there to image bottom
+        3. Closing / signature — detects "Yours faithfully / sincerely /
+                           regards" and masks likely signature lines only
         4. Sensitive content lines — lines containing medical/vulnerability
                            keywords are fully redacted (when medical profile active)
 
@@ -1184,19 +1311,135 @@ class RedactionEngine:
         def _group_text(group):
             return " ".join(str(b.get("text", "")) for b in group)
 
+        def _draw_rect(x0, y0, x1, y1, pad_x=6, pad_y=4):
+            nonlocal modified
+            x_left = max(0, int(x0) - pad_x)
+            y_top = max(0, int(y0) - pad_y)
+            x_right = min(w, int(x1) + pad_x)
+            y_bot = min(h, int(y1) + pad_y)
+            if x_right <= x_left + 4 or y_bot <= y_top + 4:
+                return
+            cv2.rectangle(image, (x_left, y_top), (x_right, y_bot), (0, 0, 0), -1)
+            modified = True
+
+        def _redact_group(group, pad_x=6, pad_y=4):
+            x0, x1, y0, y1 = _group_rect(group)
+            _draw_rect(x0, y0, x1, y1, pad_x=pad_x, pad_y=pad_y)
+
+        def _looks_like_name_line(text_line: str) -> bool:
+            cleaned = text_line.strip()
+            if not cleaned or any(ch.isdigit() for ch in cleaned):
+                return False
+            if _ANY_LABEL_PATTERN.search(cleaned) or _GENERIC_LABEL_LINE_RE.search(cleaned):
+                return False
+            words = [w.strip(".,;:") for w in cleaned.split() if w.strip(".,;:")]
+            if not (1 <= len(words) <= 4):
+                return False
+            letter_words = [w for w in words if re.search(r"[A-Za-z]", w)]
+            return len(letter_words) == len(words) and len(cleaned) <= 45
+
+        def _is_address_or_contact_line(text_line: str) -> bool:
+            return bool(
+                REDACTION_PATTERNS["email"].search(text_line)
+                or REDACTION_PATTERNS["phone"].search(text_line)
+                or REDACTION_PATTERNS["postcode"].search(text_line)
+                or _ADDRESS_LINE_RE.search(text_line)
+            )
+
+        def _is_date_line(text_line: str) -> bool:
+            return bool(
+                re.search(
+                    r"\b(?:date|january|february|march|april|may|june|july|august|"
+                    r"september|october|november|december)\b",
+                    text_line,
+                    re.IGNORECASE,
+                )
+            )
+
+        def _is_contact_label_line(text_line: str) -> bool:
+            return bool(
+                re.search(
+                    r"\b(?:phone|mobile|tel|telephone|email|date\s+of\s+birth|"
+                    r"dob|birth|council\s+reference|case\s+(?:reference|ref))\b",
+                    text_line,
+                    re.IGNORECASE,
+                )
+            )
+
         modified = False
 
         # ----------------------------------------------------------------
-        # 1. Header block — redact everything above the "Date:" line
+        # 1. Header/contact lines — redact line by line, never whole page
         # ----------------------------------------------------------------
-        _DATE_LABEL_RE = re.compile(r"\bDate\b", re.IGNORECASE)
-        date_block = next((b for b in ocr_blocks if _DATE_LABEL_RE.search(b["text"])), None)
-        if date_block:
-            _, _, date_y0, _ = _coords(date_block)
-            header_bottom = max(0, int(date_y0) - 4)
-            if header_bottom > 10:
-                cv2.rectangle(image, (0, 0), (w, header_bottom), (0, 0, 0), -1)
-                modified = True
+        groups = _line_groups()
+        first_content_idx = None
+        for idx, group in enumerate(groups[:14]):
+            text_line = _group_text(group).strip()
+            if re.search(
+                r"\b(?:dear|to\s+the|subject|re:|i\s+am\s+writing|please|request)\b",
+                text_line,
+                re.IGNORECASE,
+            ):
+                first_content_idx = idx
+                break
+
+        header_limit = first_content_idx if first_content_idx is not None else min(8, len(groups))
+        first_contact_label_idx = next(
+            (
+                idx
+                for idx, group in enumerate(groups[:header_limit])
+                if _is_contact_label_line(_group_text(group))
+            ),
+            None,
+        )
+        header_contact_indices: set[int] = set()
+        if first_contact_label_idx is not None and first_contact_label_idx <= 10:
+            pre_label_indices = [
+                idx
+                for idx in range(first_contact_label_idx)
+                if _group_text(groups[idx]).strip()
+                and not _is_date_line(_group_text(groups[idx]))
+            ]
+            has_sender_shape = len(pre_label_indices) >= 2 and any(
+                _is_address_or_contact_line(_group_text(groups[idx]))
+                or _looks_like_name_line(_group_text(groups[idx]))
+                for idx in pre_label_indices
+            )
+            if has_sender_shape:
+                header_contact_indices = {
+                    idx
+                    for idx in pre_label_indices
+                    if len(_group_text(groups[idx]).strip()) <= 70
+                }
+
+        for idx, group in enumerate(groups[:header_limit]):
+            text_line = _group_text(group).strip()
+            if not text_line:
+                continue
+            lower_line = text_line.lower()
+            if _is_date_line(lower_line):
+                continue
+
+            if idx in header_contact_indices and (allowed_types is None or "address" in allowed_types):
+                _redact_group(group, pad_x=4, pad_y=1)
+                continue
+
+            # Labelled contact lines are handled in the label-triggered pass,
+            # but completely unlabeled name/address lines need line-level masks.
+            if idx <= 1 and _looks_like_name_line(text_line):
+                if allowed_types is None or "person_name" in allowed_types:
+                    _redact_group(group, pad_x=4, pad_y=1)
+                continue
+            if _is_address_or_contact_line(text_line):
+                inferred_type = "address"
+                if REDACTION_PATTERNS["email"].search(text_line):
+                    inferred_type = "email"
+                elif REDACTION_PATTERNS["phone"].search(text_line):
+                    inferred_type = "phone"
+                elif REDACTION_PATTERNS["postcode"].search(text_line):
+                    inferred_type = "postcode"
+                if allowed_types is None or inferred_type in allowed_types or "address" in allowed_types:
+                    _redact_group(group, pad_x=4, pad_y=1)
 
         # ----------------------------------------------------------------
         # 2. Label-triggered line redaction
@@ -1227,8 +1470,7 @@ class RedactionEngine:
 
             if x_line_end > x1_label + 5:
                 # Value is in a SEPARATE block to the right of the label block
-                cv2.rectangle(image, (int(x1_label), y_top), (min(w, int(x_line_end) + 5), y_bot), (0, 0, 0), -1)
-                modified = True
+                _draw_rect(int(x1_label), y_top, min(w, int(x_line_end) + 5), y_bot, pad_x=1, pad_y=0)
             else:
                 # Label and value are in the SAME block (e.g. "phone number=07000000000")
                 # Estimate label width as the position of the separator char
@@ -1239,8 +1481,7 @@ class RedactionEngine:
                     x0_blk, x1_blk, y0_blk, y1_blk = _coords(block)
                     x_val_start = int(x0_blk + sep_ratio * (x1_blk - x0_blk))
                     if x1_blk > x_val_start + 4:
-                        cv2.rectangle(image, (x_val_start, y_top), (min(w, x1_blk + 5), y_bot), (0, 0, 0), -1)
-                        modified = True
+                        _draw_rect(x_val_start, y_top, min(w, x1_blk + 5), y_bot, pad_x=1, pad_y=0)
 
         # ----------------------------------------------------------------
         # 2a. Visual low-confidence form fallback.
@@ -1260,6 +1501,13 @@ class RedactionEngine:
                 x0, x1, y0, y1 = _group_rect(group)
                 text_line = _group_text(group)
                 compact = re.sub(r"\W+", "", text_line.lower())
+                if re.search(
+                    r"\b(?:date|january|february|march|april|may|june|july|august|"
+                    r"september|october|november|december)\b",
+                    text_line,
+                    re.IGNORECASE,
+                ):
+                    continue
                 has_digit = any(ch.isdigit() for ch in text_line)
                 has_email_hint = bool(REDACTION_PATTERNS["email"].search(text_line))
                 has_separator = any(str(b.get("text", "")).strip() in {"=", ":", "-"} for b in group)
@@ -1301,8 +1549,7 @@ class RedactionEngine:
                 x_left = max(0, min(w, int(value_start)))
                 x_right = min(w, int(x1) + 8)
                 if x_right > x_left + 10:
-                    cv2.rectangle(image, (x_left, y_top), (x_right, y_bot), (0, 0, 0), -1)
-                    modified = True
+                    _draw_rect(x_left, y_top, x_right, y_bot, pad_x=0, pad_y=0)
 
             if address_heading_index is not None:
                 for group in groups[address_heading_index + 1: address_heading_index + 4]:
@@ -1314,8 +1561,7 @@ class RedactionEngine:
                     x_left = max(0, int(x0) - 8)
                     x_right = min(w, int(x1) + 8)
                     if x_right > x_left + 10:
-                        cv2.rectangle(image, (x_left, y_top), (x_right, y_bot), (0, 0, 0), -1)
-                        modified = True
+                        _draw_rect(x_left, y_top, x_right, y_bot, pad_x=0, pad_y=0)
 
         # ----------------------------------------------------------------
         # 2b. Value-pattern sweep — catch phone/email/postcode/NIN/NHS by
@@ -1349,33 +1595,54 @@ class RedactionEngine:
                 x_start = int(x0_blk + (m.start() / block_len) * block_w)
                 x_end   = int(x0_blk + (m.end()   / block_len) * block_w)
                 if x_end > x_start + 2:
-                    cv2.rectangle(image,
-                                  (max(0, x_start - 2), max(0, y0_blk - 2)),
-                                  (min(w, x_end + 4),   min(h, y1_blk + 2)),
-                                  (0, 0, 0), -1)
-                    modified = True
+                    _draw_rect(x_start, y0_blk, x_end, y1_blk, pad_x=2, pad_y=2)
 
         # ----------------------------------------------------------------
-        # 3. Closing / signature region — redact from closing line to bottom
+        # 2c. Dependent/child name sweep — redact only the name words in
+        #     phrases like "My son, Adam Rahman, age 9".
+        # ----------------------------------------------------------------
+        if allowed_types is None or "person_name" in allowed_types:
+            for group in groups:
+                line_text = _group_text(group)
+                for m in _DEPENDENT_RELATION_NAME_RE.finditer(line_text):
+                    value = m.group("name").strip(" ,.;:-_=|")
+                    words = value.split()
+                    if len(words) < 2:
+                        continue
+                    if any(word.lower().strip(".,;:-_=|") in _DEPENDENT_NAME_STOP_WORDS for word in words):
+                        continue
+                    x0, x1, y0, y1 = _group_rect(group)
+                    line_w = max(x1 - x0, 1)
+                    line_len = max(len(line_text), 1)
+                    x_start = int(x0 + (m.start("name") / line_len) * line_w)
+                    x_end = int(x0 + ((m.start("name") + len(value)) / line_len) * line_w)
+                    if x_end > x_start + 6:
+                        _draw_rect(x_start, y0, x_end, y1, pad_x=3, pad_y=3)
+
+        # ----------------------------------------------------------------
+        # 3. Closing / signature — redact likely signature lines only
         # ----------------------------------------------------------------
         _CLOSING_RE = re.compile(
             r"\b(?:yours|faithfully|sincerely|regards|signed)\b", re.IGNORECASE
         )
-        closing_y = None
-        for block in ocr_blocks:
-            if _CLOSING_RE.search(block["text"]):
-                _, _, y0, _ = _coords(block)
-                if closing_y is None or y0 < closing_y:
-                    closing_y = y0
-        if closing_y is not None:
-            cv2.rectangle(image, (0, max(0, int(closing_y) - 4)), (w, h), (0, 0, 0), -1)
-            modified = True
+        for idx, group in enumerate(groups):
+            if not _CLOSING_RE.search(_group_text(group)):
+                continue
+            for following in groups[idx + 1: idx + 4]:
+                text_line = _group_text(following).strip()
+                x0, x1, y0, y1 = _group_rect(following)
+                if y0 - _group_rect(group)[3] > max(avg_height * 4, 80):
+                    break
+                if _looks_like_name_line(text_line) or (x1 - x0) < w * 0.45:
+                    if allowed_types is None or "signature" in allowed_types or "person_name" in allowed_types:
+                        _redact_group(following)
 
         # ----------------------------------------------------------------
         # 4. Sensitive content lines (medical / vulnerability keywords)
         # ----------------------------------------------------------------
         _SENSITIVE_LINE_RE = re.compile(
             r"\b(?:medically?|diagnosed?|allerg(?:y|ic)|symptom|breathing|"
+            r"asthma|as[tl]hma|"
             r"health|illness|medication|prescribed|condition|disability|"
             r"abuse|vulnerable|neglect|unsafe|self.harm|violence|concern)\b",
             re.IGNORECASE,
@@ -1383,11 +1650,8 @@ class RedactionEngine:
         if allowed_types is None or "medical_details" in allowed_types:
             for block in ocr_blocks:
                 if _SENSITIVE_LINE_RE.search(block["text"]):
-                    line = _line_blocks(block)
-                    y0 = max(0, int(min(_coords(b)[2] for b in line)) - 3)
-                    y1 = min(h, int(max(_coords(b)[3] for b in line)) + 3)
-                    cv2.rectangle(image, (0, y0), (w, y1), (0, 0, 0), -1)
-                    modified = True
+                    x0, x1, y0, y1 = _coords(block)
+                    _draw_rect(x0, y0, x1, y1, pad_x=4, pad_y=3)
 
         if modified:
             cv2.imwrite(redacted_image_path, image)

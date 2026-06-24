@@ -6,11 +6,11 @@ Controls which PII types are redacted based on document category.
 PROFILES: dict[str, set[str]] = {
     "general_pii": {
         "person_name", "address", "phone", "email", "dob",
-        "postcode", "signature", "council_ref", "nin",
+        "postcode", "signature", "council_ref", "nin", "child_age",
     },
     "medical_strict": {
         "person_name", "address", "phone", "email", "dob",
-        "postcode", "nin", "nhs_number", "signature", "medical_details", "notes",
+        "postcode", "nin", "nhs_number", "signature", "medical_details", "notes", "child_age",
     },
     "financial_strict": {
         "nin", "bank_account", "bank_details", "sort_code",
@@ -18,7 +18,7 @@ PROFILES: dict[str, set[str]] = {
     },
     "safeguarding_strict": {
         "person_name", "address", "phone", "email", "dob",
-        "postcode", "nin", "school", "signature", "case_ref", "medical_details", "notes",
+        "postcode", "nin", "school", "signature", "case_ref", "medical_details", "notes", "child_age",
     },
     "vehicle_parking": {
         "vehicle_reg", "pcn", "person_name", "address", "phone", "email",
@@ -26,7 +26,7 @@ PROFILES: dict[str, set[str]] = {
     "unknown_strict": {
         "person_name", "address", "phone", "email", "dob",
         "postcode", "nin", "signature", "council_ref", "notes",
-        "bank_details",
+        "bank_details", "medical_details", "child_age",
     },
 }
 

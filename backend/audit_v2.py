@@ -5,9 +5,7 @@ import hmac
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-# For tamper-proof audit, we would use proper crypto libraries
-# For now, use HMAC-SHA256 for integrity
-AUDIT_SECRET = os.environ.get("AUDIT_SECRET", "synthetiq-audit-secret-change-in-production")
+AUDIT_SECRET = os.environ.get("AUDIT_SECRET", "dev-only-synthetiq-audit-secret-change-before-production")
 
 
 def _compute_hash(data: str, previous_hash: str) -> str:
@@ -26,7 +24,10 @@ def log_action(db, document_id: int, action: str, user_id: Optional[int] = None,
     Log an action with tamper-proof chain hashing.
     Each entry includes the hash of the previous entry, creating a chain.
     """
-    from models_v2 import AuditLog
+    from models_v2 import AuditLog, Document
+
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    council_id = doc.council_id if doc else None
 
     # Get the previous hash
     last_entry = (
@@ -38,12 +39,14 @@ def log_action(db, document_id: int, action: str, user_id: Optional[int] = None,
     previous_hash = last_entry.chain_hash if last_entry else "0" * 64
 
     # Build the entry data
+    timestamp = datetime.now(timezone.utc)
     entry_data = {
+        "council_id": council_id,
         "document_id": document_id,
         "action": action,
         "user_id": user_id,
         "details": details or {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp.isoformat(),
         "previous_hash": previous_hash,
     }
     
@@ -54,6 +57,7 @@ def log_action(db, document_id: int, action: str, user_id: Optional[int] = None,
 
     # Create the audit log entry
     entry = AuditLog(
+        council_id=council_id,
         document_id=document_id,
         action=action,
         user_id=user_id,
@@ -61,6 +65,7 @@ def log_action(db, document_id: int, action: str, user_id: Optional[int] = None,
         chain_hash=chain_hash,
         signature=signature,
         previous_hash=previous_hash,
+        timestamp=timestamp,
     )
     db.add(entry)
     db.commit()
@@ -93,10 +98,11 @@ def verify_audit_chain(db, document_id: int) -> bool:
         
         # Rebuild entry data
         entry_data = {
+            "council_id": entry.council_id,
             "document_id": entry.document_id,
             "action": entry.action,
             "user_id": entry.user_id,
-            "details": entry.details,
+            "details": entry.details or {},
             "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
             "previous_hash": entry.previous_hash,
         }

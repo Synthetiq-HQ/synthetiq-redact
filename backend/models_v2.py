@@ -53,6 +53,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
+    council_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("councils.id"), nullable=True)
     email: Mapped[str] = Column(String, unique=True, nullable=False)
     hashed_password: Mapped[str] = Column(String, nullable=False)
     role: Mapped[str] = Column(String, nullable=False, default="processor")  # admin, reviewer, processor, auditor, caseworker
@@ -65,10 +66,21 @@ class User(Base):
     audit_logs = relationship("AuditLog", back_populates="user")
 
 
+class Council(Base):
+    __tablename__ = "councils"
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = Column(String, nullable=False, default="Local Council")
+    deployment_id: Mapped[Optional[str]] = Column(String, nullable=True)
+    retention_policy_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("retention_policies.id"), nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class BatchJob(Base):
     __tablename__ = "batch_jobs"
 
     id: Mapped[str] = Column(String, primary_key=True, index=True)
+    council_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("councils.id"), nullable=True)
     name: Mapped[str] = Column(String, nullable=True)
     status: Mapped[str] = Column(String, nullable=False, default="queued")  # queued, processing, complete, failed
     total_docs: Mapped[int] = Column(Integer, default=0)
@@ -86,9 +98,14 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
+    council_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("councils.id"), nullable=True)
+    uploaded_by: Mapped[Optional[int]] = Column(Integer, ForeignKey("users.id"), nullable=True)
     filename: Mapped[str] = Column(String, nullable=False)
+    source_filename: Mapped[Optional[str]] = Column(String, nullable=True)
     original_path: Mapped[str] = Column(String, nullable=False)
+    storage_key: Mapped[Optional[str]] = Column(String, nullable=True)
     redacted_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    redacted_storage_key: Mapped[Optional[str]] = Column(String, nullable=True)
     mask_path: Mapped[Optional[str]] = Column(String, nullable=True)
     status: Mapped[str] = Column(String, nullable=False, default="uploaded")
     category: Mapped[Optional[str]] = Column(String, nullable=True)
@@ -110,6 +127,9 @@ class Document(Base):
     handwriting_backend: Mapped[Optional[str]] = Column(String, nullable=True)
     handwriting_confidence: Mapped[Optional[float]] = Column(Float, nullable=True)
     handwriting_review_reason: Mapped[Optional[str]] = Column(Text, nullable=True)
+    confidence_summary: Mapped[Optional[dict]] = Column(JSON, nullable=True)
+    needs_review_reason: Mapped[Optional[str]] = Column(Text, nullable=True)
+    retention_due_at: Mapped[Optional[datetime]] = Column(DateTime, nullable=True)
     created_at: Mapped[datetime] = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -191,6 +211,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
+    council_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("councils.id"), nullable=True)
     document_id: Mapped[int] = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     action: Mapped[str] = Column(String, nullable=False)
     user_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("users.id"), nullable=True, default=None)

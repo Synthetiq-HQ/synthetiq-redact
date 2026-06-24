@@ -14,7 +14,7 @@ from config import CONFIDENCE_THRESHOLD, PROCESSED_DIR, CATEGORIES
 from database_v2 import SessionLocal
 from models_v2 import Document, OCRResult, Redaction
 from audit_v2 import log_action
-from preprocessing import preprocess_pipeline
+from preprocessing import preprocess_pipeline, processed_display_path
 from ocr_engine import OCREngine
 from redaction import RedactionEngine
 from translation import TranslationEngine
@@ -29,6 +29,26 @@ from document_exports import (
     write_transcription_json,
 )
 from redaction_profiles import get_profiles_for_category, get_allowed_types, requires_review
+
+
+def _pdf_page_count(path: str) -> Optional[int]:
+    if os.path.splitext(path)[1].lower() != ".pdf":
+        return None
+    try:
+        from PyPDF2 import PdfReader
+        return len(PdfReader(path).pages)
+    except Exception:
+        return None
+
+
+def _public_error_message(exc: Exception) -> str:
+    message = str(exc)
+    lower = message.lower()
+    if "pdf" in lower:
+        return "The PDF could not be rendered. Check that the file is valid and PDF rendering support is installed."
+    if "cannot load image" in lower or "could not load image" in lower:
+        return "The file could not be converted into a readable image. Upload a valid PDF or supported image."
+    return "Processing failed. Check the server logs for details."
 
 
 def _keyword_estimate(text: str) -> str:
@@ -81,9 +101,19 @@ class DocumentPipeline:
                 return
 
             # 1. Preprocessing
-            await self._set_status(db, doc, "preprocessing", "Deskew, denoise, enhance, sharpen")
+            await self._set_status(db, doc, "preprocessing", "Preparing display and OCR images")
             await asyncio.sleep(0.1)
             preprocessed_path = preprocess_pipeline(doc.original_path)
+            display_path = processed_display_path(doc.original_path)
+            redaction_image_path = display_path if os.path.exists(display_path) else preprocessed_path
+            pdf_pages = _pdf_page_count(doc.original_path)
+            if pdf_pages is not None:
+                doc.flag_needs_review = True
+                doc.needs_review_reason = (
+                    f"PDF input rendered from page 1 of {pdf_pages}. "
+                    "Review the original PDF before release."
+                )
+                db.commit()
 
             # 2. OCR
             await self._set_status(db, doc, "ocr", "Extracting text")
@@ -163,8 +193,8 @@ class DocumentPipeline:
                     db.add(r)
 
             # Redact image and text (outputs go into per-doc folder)
-            redacted_path = self.redaction.redact_image(preprocessed_path, redaction_meta, out_dir=out_folder)
-            mask_path = self.redaction.generate_mask_overlay(preprocessed_path, redaction_meta, out_dir=out_folder)
+            redacted_path = self.redaction.redact_image(redaction_image_path, redaction_meta, out_dir=out_folder)
+            mask_path = self.redaction.generate_mask_overlay(redaction_image_path, redaction_meta, out_dir=out_folder)
             redacted_text = self.redaction.redact_text(clean_text, clean_spans)
 
             # Handwriting safety pass — extra image-coordinate redactions for low-confidence docs
@@ -207,8 +237,8 @@ class DocumentPipeline:
 
             db.commit()
 
-            # 4. Translation (if non-English detected and enabled)
-            await self._set_status(db, doc, "translation", "Detecting language")
+            # 4. Language check, with translation only for non-English documents when enabled.
+            await self._set_status(db, doc, "translation", "Checking document language")
             await asyncio.sleep(0.1)
 
             # Always detect language
@@ -291,6 +321,7 @@ class DocumentPipeline:
                     "handwriting_backend": doc.handwriting_backend,
                     "handwriting_confidence": doc.handwriting_confidence,
                     "handwriting_review_reason": doc.handwriting_review_reason,
+                    "needs_review_reason": doc.needs_review_reason,
                     "department": doc.department,
                     "urgency_score": doc.urgency_score,
                     "sentiment": doc.sentiment,
@@ -326,7 +357,9 @@ class DocumentPipeline:
             try:
                 doc = db.query(Document).filter(Document.id == doc_id).first()
                 if doc:
-                    doc.status = "error"
+                    doc.status = "failed"
+                    if hasattr(doc, "needs_review_reason"):
+                        doc.needs_review_reason = _public_error_message(e)
                     db.commit()
                     log_action(db, doc.id, "error", details={"error": str(e)})
             except Exception:

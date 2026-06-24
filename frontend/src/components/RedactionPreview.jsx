@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { getImageUrl } from '../api';
+import { getImageBlobUrl } from '../api';
 
 export default function RedactionPreview({ setScreen, docId, docData }) {
   const redactions = docData?.redactions ?? [];
-  const originalUrl = docId ? getImageUrl(docId, 'original') : null;
-  const redactedUrl = docId ? getImageUrl(docId, 'redacted') : null;
+  const [originalUrl, setOriginalUrl] = useState(null);
+  const [redactedUrl, setRedactedUrl] = useState(null);
 
   // Shared zoom/pan state
   const [scale, setScale] = useState(1);
@@ -17,6 +17,35 @@ export default function RedactionPreview({ setScreen, docId, docData }) {
   const leftRef = useRef(null);
   const rightRef = useRef(null);
   const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!docId) return;
+    let mounted = true;
+    const urls = [];
+
+    async function loadImages() {
+      try {
+        const original = await getImageBlobUrl(docId, 'original');
+        urls.push(original);
+        if (mounted) setOriginalUrl(original);
+      } catch {
+        if (mounted) setOriginalUrl(null);
+      }
+      try {
+        const redacted = await getImageBlobUrl(docId, 'redacted');
+        urls.push(redacted);
+        if (mounted) setRedactedUrl(redacted);
+      } catch {
+        if (mounted) setRedactedUrl(null);
+      }
+    }
+
+    loadImages();
+    return () => {
+      mounted = false;
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [docId]);
 
   const handleWheel = useCallback((e) => {
     // Only zoom if Ctrl/Cmd is held OR if hovering directly over an image viewer

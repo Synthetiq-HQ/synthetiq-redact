@@ -1,10 +1,20 @@
 import { useState } from 'react';
-import { approveDocument, flagForReview, getExportUrl } from '../api';
+import { approveDocument, flagForReview, downloadExport } from '../api';
 import StatusBadge from './StatusBadge';
 
 export default function FinalRecord({ setScreen, docId, docData, setDocData }) {
   const [actionState, setActionState] = useState('idle'); // idle | approving | flagging | success
   const [actionMessage, setActionMessage] = useState('');
+  const [exportError, setExportError] = useState('');
+
+  const handleDownload = async (type) => {
+    setExportError('');
+    try {
+      await downloadExport(docId, type);
+    } catch (err) {
+      setExportError(err.response?.data?.detail || 'Export is not available yet.');
+    }
+  };
 
   const handleApprove = async () => {
     setActionState('approving');
@@ -12,7 +22,7 @@ export default function FinalRecord({ setScreen, docId, docData, setDocData }) {
       await approveDocument(docId);
       setActionState('success');
       setActionMessage('Document approved and stored successfully.');
-      setDocData((prev) => (prev ? { ...prev, status: 'complete' } : prev));
+      setDocData((prev) => (prev ? { ...prev, status: 'review_approved' } : prev));
       setTimeout(() => setScreen('list'), 1500);
     } catch (err) {
       setActionState('idle');
@@ -37,8 +47,7 @@ export default function FinalRecord({ setScreen, docId, docData, setDocData }) {
   return (
     <div className="flex flex-col gap-4 py-4">
       <div className="text-center">
-        <div className="text-4xl mb-2">📋</div>
-        <h2 className="text-xl font-bold text-slate-800">Final Review</h2>
+        <h2 className="text-xl font-bold text-slate-800">Final review</h2>
         <p className="text-sm text-slate-500 mt-1">Document #{docId} · {docData?.filename}</p>
       </div>
 
@@ -87,32 +96,45 @@ export default function FinalRecord({ setScreen, docId, docData, setDocData }) {
         </div>
       ) : (
         <div className="flex flex-col gap-2">
+          <button type="button" onClick={() => handleDownload('docx')}
+            className="w-full rounded-lg bg-slate-900 px-4 py-4 text-base font-bold text-white shadow-sm hover:bg-slate-800">
+            Download redacted document
+          </button>
+          <button type="button" onClick={() => handleDownload('pdf')}
+            className="w-full rounded-lg bg-slate-800 px-4 py-4 text-base font-bold text-white shadow-sm hover:bg-slate-700">
+            Download burned PDF
+          </button>
           <button onClick={handleApprove} disabled={actionState !== 'idle'}
             className="w-full py-4 rounded-2xl bg-emerald-600 text-white font-bold text-base flex items-center justify-center gap-2 shadow-lg hover:bg-emerald-500 disabled:opacity-60">
             {actionState === 'approving'
               ? <><span className="h-5 w-5 rounded-full border-2 border-white border-t-transparent animate-spin" />Approving...</>
-              : <>✅ Approve & Store</>}
+              : <>Approve release</>}
           </button>
           <button onClick={handleFlag} disabled={actionState !== 'idle'}
             className="w-full py-4 rounded-2xl bg-amber-500 text-white font-bold text-base flex items-center justify-center gap-2 shadow hover:bg-amber-400 disabled:opacity-60">
             {actionState === 'flagging'
               ? <><span className="h-5 w-5 rounded-full border-2 border-white border-t-transparent animate-spin" />Flagging...</>
-              : <>⚠️ Flag for Human Review</>}
+              : <>Send to human review</>}
           </button>
-          <a href={getExportUrl(docId)} download={`document_${docId}_redacted.txt`}
+          <button type="button" onClick={() => handleDownload('text')}
             className="w-full py-3 rounded-xl bg-slate-800 text-white font-semibold text-sm flex items-center justify-center gap-2 hover:bg-slate-700">
-            ⬇ Download Redacted Text
-          </a>
+            Download redacted text
+          </button>
           <div className="grid grid-cols-2 gap-2">
-            <a href={getExportUrl(docId, 'clean')} download={`document_${docId}_clean_transcription.txt`}
+            <button type="button" onClick={() => handleDownload('clean')}
               className="py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-slate-200">
-              Clean Text
-            </a>
-            <a href={getExportUrl(docId, 'docx')} download={`document_${docId}_redacted.docx`}
+              OCR text
+            </button>
+            <button type="button" onClick={() => handleDownload('json')}
               className="py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-slate-200">
-              Word Export
-            </a>
+              Metadata JSON
+            </button>
           </div>
+          {exportError && (
+            <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+              {exportError}
+            </div>
+          )}
           {docData?.handwriting_review_reason && (
             <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800">
               {docData.handwriting_review_reason}
@@ -121,11 +143,11 @@ export default function FinalRecord({ setScreen, docId, docData, setDocData }) {
           <div className="flex gap-2">
             <button onClick={() => setScreen('scan')}
               className="flex-1 py-3 rounded-xl bg-slate-200 text-slate-700 font-semibold text-sm hover:bg-slate-300">
-              ➕ New Doc
+              New document
             </button>
             <button onClick={() => setScreen('list')}
               className="flex-1 py-3 rounded-xl bg-slate-200 text-slate-700 font-semibold text-sm hover:bg-slate-300">
-              📋 All Docs
+              All documents
             </button>
           </div>
         </div>

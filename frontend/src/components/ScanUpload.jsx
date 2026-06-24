@@ -1,17 +1,49 @@
 import { useState, useRef, useCallback } from 'react';
 import { uploadDocument } from '../api';
 
+const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.pdf', '.gif', '.bmp', '.tiff', '.tif'];
+const ACCEPTED_INPUT = 'image/png,image/jpeg,image/gif,image/bmp,image/tiff,application/pdf,.png,.jpg,.jpeg,.pdf,.gif,.bmp,.tiff,.tif';
+
 export default function ScanUpload({ setScreen, setDocId, setDocData, setProgress }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [file, setFile] = useState(null);
   const [error, setError] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const resetSelectedFile = useCallback(() => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setFile(null);
+    setPreviewUrl(null);
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [previewUrl]);
+
+  const selectFile = useCallback((nextFile) => {
+    if (!nextFile) return;
+    const lowerName = nextFile.name.toLowerCase();
+    const allowed = ACCEPTED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+    if (!allowed) {
+      setError('Upload a PNG, JPG, TIFF, GIF, BMP, or PDF file.');
+      return;
+    }
+
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setError(null);
+    setFile(nextFile);
+    if (nextFile.type.startsWith('image/')) {
+      setPreviewUrl(URL.createObjectURL(nextFile));
+    } else {
+      setPreviewUrl(null);
+    }
+  }, [previewUrl]);
 
   const startCamera = useCallback(async () => {
     setError(null);
@@ -53,19 +85,37 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
     canvas.toBlob(blob => {
       if (!blob) return;
       const f = new File([blob], `capture_${Date.now()}.jpg`, { type: 'image/jpeg' });
-      setFile(f);
-      setPreviewUrl(URL.createObjectURL(f));
+      selectFile(f);
       stopCamera();
     }, 'image/jpeg', 0.92);
-  }, [stopCamera]);
+  }, [selectFile, stopCamera]);
 
   const handleFileSelect = useCallback(e => {
     const f = e.target.files?.[0];
     if (!f) return;
-    setError(null);
-    setFile(f);
-    setPreviewUrl(URL.createObjectURL(f));
+    selectFile(f);
+  }, [selectFile]);
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(true);
   }, []);
+
+  const handleDragLeave = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(false);
+    const dropped = event.dataTransfer.files?.[0];
+    selectFile(dropped);
+  }, [selectFile]);
 
   const handleUpload = useCallback(async () => {
     if (!file) return;
@@ -84,15 +134,14 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
       setError(err.message || 'Upload failed.');
       setIsUploading(false);
     }
-  }, [file, setDocId, setScreen, setProgress]);
+  }, [file, translateEnabled, selectedCategory, setDocId, setScreen, setProgress]);
 
   return (
     <div className="flex flex-col gap-6 py-4">
       {/* Header */}
-      <div className="text-center">
-        <div className="text-4xl mb-2">📄</div>
-        <h2 className="text-xl font-bold text-slate-800">Scan Document</h2>
-        <p className="text-sm text-slate-500 mt-1">Upload or photograph a council document to process</p>
+      <div>
+        <h2 className="text-xl font-semibold text-slate-900">New document</h2>
+        <p className="mt-1 text-sm text-slate-500">Upload a scanned image or PDF for local redaction review.</p>
       </div>
 
       {/* Camera view */}
@@ -101,8 +150,8 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
           <video ref={videoRef} autoPlay playsInline muted className="w-full max-h-[55vh] object-cover" />
           <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent p-4 flex justify-center gap-4">
             <button onClick={capturePhoto}
-              className="h-16 w-16 rounded-full bg-white shadow-lg flex items-center justify-center text-2xl ring-4 ring-emerald-400 active:scale-95 transition-transform">
-              📷
+              className="h-16 w-16 rounded-full bg-white shadow-lg flex items-center justify-center text-sm font-bold text-slate-900 ring-4 ring-emerald-400 active:scale-95 transition-transform">
+              Capture
             </button>
             <button onClick={stopCamera}
               className="h-12 w-12 rounded-full bg-red-500 flex items-center justify-center text-white text-lg shadow-lg active:scale-95 transition-transform self-end">
@@ -112,47 +161,66 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
         </div>
       )}
 
-      {/* Preview */}
-      {previewUrl && !cameraActive && (
-        <div className="relative rounded-2xl overflow-hidden shadow-lg border border-slate-200">
-          <img src={previewUrl} alt="Preview" className="w-full max-h-[50vh] object-contain bg-slate-100" />
-          <button onClick={() => { setFile(null); setPreviewUrl(null); setError(null); }}
-            className="absolute top-3 right-3 bg-red-500 text-white text-xs px-3 py-1 rounded-full shadow hover:bg-red-600">
+      {/* Preview / selected file */}
+      {file && !cameraActive && (
+        <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+          {previewUrl ? (
+            <img src={previewUrl} alt="Selected document preview" className="w-full max-h-[50vh] object-contain bg-slate-100" />
+          ) : (
+            <div className="flex min-h-48 flex-col items-center justify-center gap-2 bg-slate-50 p-6 text-center">
+              <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                PDF
+              </div>
+              <div className="max-w-full truncate text-sm font-semibold text-slate-800">{file.name}</div>
+              <div className="text-xs text-slate-500">PDF processing currently renders page 1 and sends the result to human review.</div>
+            </div>
+          )}
+          <button onClick={resetSelectedFile}
+            className="absolute right-3 top-3 rounded-md bg-white px-3 py-1 text-xs font-semibold text-slate-700 shadow ring-1 ring-slate-200 hover:bg-slate-50">
             Remove
           </button>
         </div>
       )}
 
       {/* Upload controls */}
-      {!cameraActive && !previewUrl && (
-        <div className="grid grid-cols-2 gap-3">
-          {/* Mobile: native capture */}
-          <label className="sm:hidden flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 text-white p-5 text-sm font-semibold cursor-pointer active:bg-slate-700 shadow-md">
-            <span className="text-3xl">📷</span>
-            Take Photo
-            <input type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="sr-only" />
-          </label>
-          {/* Desktop: getUserMedia */}
-          <button onClick={startCamera}
-            className="hidden sm:flex flex-col items-center justify-center gap-2 rounded-2xl bg-slate-800 text-white p-5 text-sm font-semibold active:bg-slate-700 shadow-md">
-            <span className="text-3xl">📷</span>
-            Use Camera
+      {!cameraActive && !file && (
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`flex min-h-64 w-full flex-col items-center justify-center rounded-lg border-2 border-dashed bg-white px-6 py-10 text-center transition-colors ${
+              isDragging ? 'border-emerald-500 bg-emerald-50' : 'border-slate-300 hover:border-slate-400 hover:bg-slate-50'
+            }`}
+          >
+            <span className="text-base font-semibold text-slate-900">Drop a file here or click to choose</span>
+            <span className="mt-2 text-sm text-slate-500">PNG, JPG, TIFF, GIF, BMP, or PDF</span>
+            <span className="mt-4 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Choose file</span>
           </button>
-          <label className="flex flex-col items-center justify-center gap-2 rounded-2xl bg-white text-slate-700 p-5 text-sm font-semibold cursor-pointer ring-2 ring-slate-200 hover:ring-emerald-400 shadow-md transition-all">
-            <span className="text-3xl">📁</span>
-            Upload File
-            <input type="file" accept="image/*,.pdf" onChange={handleFileSelect} className="sr-only" />
-          </label>
+          <input ref={fileInputRef} type="file" accept={ACCEPTED_INPUT} onChange={handleFileSelect} className="sr-only" />
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="sm:hidden flex items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm">
+              Take photo
+              <input type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="sr-only" />
+            </label>
+            <button onClick={startCamera}
+              className="hidden rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 sm:block">
+              Use camera
+            </button>
+          </div>
         </div>
       )}
 
       {/* Process button */}
-      {previewUrl && !cameraActive && (
+      {file && !cameraActive && (
         <button onClick={handleUpload} disabled={isUploading}
-          className="w-full py-4 rounded-2xl bg-emerald-600 text-white font-bold text-base flex items-center justify-center gap-3 shadow-lg hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-60 transition-colors">
+          className="flex w-full items-center justify-center gap-3 rounded-lg bg-emerald-700 py-4 text-base font-bold text-white shadow-sm transition-colors hover:bg-emerald-600 active:bg-emerald-800 disabled:opacity-60">
           {isUploading
             ? <><span className="h-5 w-5 rounded-full border-2 border-white border-t-transparent animate-spin" />Processing...</>
-            : <><span className="text-xl">⚡</span>Process Document</>}
+            : <>Process document</>}
         </button>
       )}
 
@@ -182,7 +250,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
               <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${translateEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
             </div>
             <input type="checkbox" className="sr-only" checked={translateEnabled} onChange={e => setTranslateEnabled(e.target.checked)} />
-            <span className="text-sm text-slate-700 font-medium">Translate to English <span className="text-slate-400 font-normal">(if non-English detected)</span></span>
+            <span className="text-sm text-slate-700 font-medium">Non-English translation <span className="text-slate-400 font-normal">(off by default)</span></span>
           </label>
         </div>
       )}
@@ -195,7 +263,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
 
       {/* Demo badge */}
       <div className="text-center text-xs text-slate-400 border-t border-slate-100 pt-3">
-        🔒 Synthetic demo data only · Hillingdon Council × Brunel University
+        Synthetic demo data only · local processing workspace
       </div>
 
       <canvas ref={canvasRef} className="hidden" />

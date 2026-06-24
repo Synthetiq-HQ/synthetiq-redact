@@ -2,14 +2,14 @@ import { useEffect, useRef } from 'react';
 import { subscribeProgress, getDocument } from '../api';
 
 const STEPS = [
-  { key: 'uploaded',       label: 'Upload',     icon: '📤' },
-  { key: 'preprocessing',  label: 'Clean',      icon: '🖼️' },
-  { key: 'ocr',            label: 'Read Text',  icon: '🔍' },
-  { key: 'redaction',      label: 'Redact',     icon: '🛡️' },
-  { key: 'translation',    label: 'Translate',  icon: '🌐' },
-  { key: 'classification', label: 'Classify',   icon: '🗂️' },
-  { key: 'routing',        label: 'Route',      icon: '📬' },
-  { key: 'complete',       label: 'Done',       icon: '✅' },
+  { key: 'uploaded',       label: 'Upload',     icon: '01' },
+  { key: 'preprocessing',  label: 'Prepare',    icon: '02' },
+  { key: 'ocr',            label: 'Read text',  icon: '03' },
+  { key: 'redaction',      label: 'Redact',     icon: '04' },
+  { key: 'translation',    label: 'Language',   icon: '05' },
+  { key: 'classification', label: 'Classify',   icon: '06' },
+  { key: 'routing',        label: 'Route',      icon: '07' },
+  { key: 'complete',       label: 'Done',       icon: '08' },
 ];
 
 const STEP_INDEX = Object.fromEntries(STEPS.map((s, i) => [s.key, i]));
@@ -26,7 +26,7 @@ export default function ProcessingProgress({ setScreen, docId, setDocData, progr
       if (data.status === 'complete' || data.status === 'needs_review') {
         setTimeout(async () => {
           try { setDocData(await getDocument(docId)); } catch {}
-          setScreen('ocr');
+          setScreen('review');
         }, 800);
       }
     });
@@ -35,14 +35,13 @@ export default function ProcessingProgress({ setScreen, docId, setDocData, progr
 
   const currentIdx = STEP_INDEX[progress.status] ?? 0;
   const pct = progress.percent ?? Math.round((currentIdx / (STEPS.length - 1)) * 100);
-  const isError = progress.status === 'error';
+  const isError = progress.status === 'error' || progress.status === 'failed';
   const isDone = progress.status === 'complete' || progress.status === 'needs_review';
 
   return (
     <div className="flex flex-col gap-6 py-4">
       {/* Title */}
       <div className="text-center">
-        <div className="text-4xl mb-2">{isError ? '❌' : isDone ? '✅' : '⚙️'}</div>
         <h2 className="text-xl font-bold text-slate-800">
           {isError ? 'Processing Failed' : isDone ? 'Done!' : 'Processing Document'}
         </h2>
@@ -54,7 +53,7 @@ export default function ProcessingProgress({ setScreen, docId, setDocData, progr
       {/* Big progress bar */}
       <div>
         <div className="flex justify-between text-xs text-slate-500 mb-2">
-          <span>{STEPS[currentIdx]?.icon} {STEPS[currentIdx]?.label}</span>
+          <span>{STEPS[currentIdx]?.label}</span>
           <span className="font-bold text-slate-700">{pct}%</span>
         </div>
         <div className="h-3 w-full rounded-full bg-slate-100 overflow-hidden shadow-inner">
@@ -79,7 +78,7 @@ export default function ProcessingProgress({ setScreen, docId, setDocData, progr
                 active ? 'bg-blue-100 text-blue-700 ring-2 ring-blue-300' :
                          'bg-slate-100 text-slate-400'
               }`}>
-              <span>{step.icon}</span>
+              <span className="font-mono text-[10px]">{step.icon}</span>
               <span className="hidden sm:inline">{step.label}</span>
             </div>
           );

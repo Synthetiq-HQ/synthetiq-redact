@@ -34,7 +34,11 @@ export default function DocumentList({ setScreen, setDocId, setDocData, setProgr
   const handleView = (doc) => {
     setDocId(doc.id);
     setDocData(doc);
-    setScreen('final');
+    if (['complete', 'needs_review', 'in_review', 'review_approved', 'exported'].includes(doc.status)) {
+      setScreen('review');
+    } else {
+      setScreen('final');
+    }
   };
 
   return (
@@ -48,7 +52,7 @@ export default function DocumentList({ setScreen, setDocId, setDocData, setProgr
               disabled={loading}
               className="tap-target rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 active:bg-slate-300 disabled:opacity-50"
             >
-              {loading ? '⏳' : '🔄'} Refresh
+              {loading ? 'Refreshing' : 'Refresh'}
             </button>
           </div>
         </div>
@@ -61,7 +65,6 @@ export default function DocumentList({ setScreen, setDocId, setDocData, setProgr
 
         {docs.length === 0 && !loading && (
           <div className="rounded-lg bg-slate-50 py-8 text-center text-sm text-slate-400 ring-1 ring-slate-200">
-            <div className="mb-2 text-2xl">📭</div>
             No documents yet.
           </div>
         )}
@@ -167,7 +170,7 @@ export default function DocumentList({ setScreen, setDocId, setDocData, setProgr
           onClick={handleNew}
           className="tap-target mt-4 w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-500 active:bg-emerald-700"
         >
-          ➕ Process New Document
+          Process New Document
         </button>
       </div>
     </div>

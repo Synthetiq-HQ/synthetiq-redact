@@ -38,7 +38,7 @@ class RedactionCase:
 
 
 def build_cases() -> list[RedactionCase]:
-    """Return 50 synthetic extracted-text redaction cases."""
+    """Return synthetic extracted-text redaction cases."""
     return [
         # Housing repairs
         RedactionCase(
@@ -131,6 +131,17 @@ def build_cases() -> list[RedactionCase]:
             ["Reference:", "Full Name:", "Home Address:", "Description:"],
             ["damp wall in kitchen"],
             ["council_ref", "person_name", "address"],
+            False,
+        ),
+        RedactionCase(
+            "housing_06_dependent_child_name",
+            "housing_repairs",
+            "housing_repairs",
+            "My son, Adam Rahman, age 9, has asthma and the damp has made his breathing worse.",
+            ["Adam Rahman", "age 9"],
+            [],
+            ["My son", "has asthma", "damp has made his breathing worse"],
+            ["person_name", "child_age"],
             False,
         ),
         # Council tax / benefits
@@ -815,8 +826,8 @@ def summarize(results: list[dict[str, Any]]) -> None:
 def main() -> int:
     """Run all synthetic redaction cases."""
     cases = build_cases()
-    if len(cases) != 50:
-        raise RuntimeError(f"Expected 50 cases, found {len(cases)}")
+    if len(cases) < 50:
+        raise RuntimeError(f"Expected at least 50 cases, found {len(cases)}")
 
     engine = RedactionEngine()
     results = [evaluate_case(engine, case) for case in cases]

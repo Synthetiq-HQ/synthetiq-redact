@@ -8,7 +8,7 @@ export default function StatusBadge({ status }) {
     preprocessing: { class: 'status-badge--preprocessing', label: 'Preprocessing' },
     ocr: { class: 'status-badge--ocr', label: 'OCR' },
     redaction: { class: 'status-badge--redaction', label: 'Redaction' },
-    translation: { class: 'status-badge--translation', label: 'Translation' },
+    translation: { class: 'status-badge--translation', label: 'Language' },
     classification: { class: 'status-badge--classification', label: 'Classifying' },
     routing: { class: 'status-badge--routing', label: 'Routing' },
   };

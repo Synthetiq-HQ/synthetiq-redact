@@ -4,10 +4,16 @@ import json
 import uuid
 import hashlib
 import hmac
+import math
+import re
+import shlex
+import secrets
+import subprocess
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, File, Form, UploadFile, Depends, HTTPException, BackgroundTasks, Query, status
+from fastapi import FastAPI, File, Form, UploadFile, Depends, HTTPException, BackgroundTasks, Query, status, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -19,10 +25,10 @@ from config import UPLOAD_DIR, PROCESSED_DIR, DB_PATH, DEPARTMENTS
 from database_v2 import init_db, get_db, SessionLocal
 from models_v2 import (
     Document, OCRResult, Redaction, AuditLog,
-    User, BatchJob, RedactionReview, Webhook, RetentionPolicy,
+    User, Council, BatchJob, RedactionReview, Webhook, RetentionPolicy,
     batch_job_documents
 )
-from audit_v2 import log_action
+from audit_v2 import log_action, verify_audit_chain
 from pipeline import DocumentPipeline
 from ocr_engine_v2 import OCREngineManager
 from redaction import RedactionEngine
@@ -32,12 +38,55 @@ from sentiment_urgency import SentimentUrgencyEngine
 from llm_engine import LLMEngine
 from handwriting_transcription import HandwritingTranscriptionEngine
 
-app = FastAPI(title="Synthetiq Redact v2.0", version="2.0.0")
+APP_ENV = os.environ.get("APP_ENV", "development").lower()
+IS_PRODUCTION = APP_ENV == "production"
+DEFAULT_DEV_JWT_SECRET = "dev-only-synthetiq-redact-secret-change-before-production"
+DEFAULT_DEV_AUDIT_SECRET = "dev-only-synthetiq-audit-secret-change-before-production"
+JWT_SECRET = os.environ.get("JWT_SECRET", DEFAULT_DEV_JWT_SECRET)
+AUDIT_SECRET = os.environ.get("AUDIT_SECRET", DEFAULT_DEV_AUDIT_SECRET)
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.environ.get("JWT_EXPIRATION_HOURS", "8"))
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".pdf", ".gif", ".bmp", ".tiff", ".tif"}
+ALLOWED_MAGIC = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".pdf": (b"%PDF",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".bmp": (b"BM",),
+    ".tiff": (b"II*\x00", b"MM\x00*"),
+    ".tif": (b"II*\x00", b"MM\x00*"),
+}
+VALID_ROLES = {"admin", "reviewer", "processor", "auditor", "dpo", "caseworker"}
+DEFAULT_COUNCIL_NAME = os.environ.get("DEFAULT_COUNCIL_NAME", "Pilot Council")
+WEBHOOKS_ENABLED = os.environ.get("ENABLE_WEBHOOKS", "0") == "1"
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+if IS_PRODUCTION and (
+    JWT_SECRET == DEFAULT_DEV_JWT_SECRET or AUDIT_SECRET == DEFAULT_DEV_AUDIT_SECRET
+):
+    raise RuntimeError("Production requires explicit JWT_SECRET and AUDIT_SECRET values.")
+
+app = FastAPI(
+    title="Synthetiq Redact v2.0",
+    version="2.0.0",
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
+)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,9 +94,6 @@ app.add_middleware(
 
 # Security
 security = HTTPBearer(auto_error=False)
-JWT_SECRET = os.environ.get("JWT_SECRET", "synthetiq-redact-secret-key-change-in-production")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24
 
 # Global state for AI model warm-up
 app.state.ocr_engine = None
@@ -70,11 +116,12 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
-def create_token(user_id: int, email: str, role: str) -> str:
+def create_token(user_id: int, email: str, role: str, council_id: Optional[int]) -> str:
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
+        "council_id": council_id,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS),
         "iat": datetime.now(timezone.utc),
     }
@@ -88,43 +135,344 @@ def decode_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-_dummy_user = None
-
-def _get_dummy_user(db: Session) -> User:
-    global _dummy_user
-    if _dummy_user is None:
-        _dummy_user = db.query(User).filter(User.email == "system@local").first()
-        if _dummy_user is None:
-            _dummy_user = User(
-                email="system@local",
-                hashed_password="",
-                role="admin",
-                is_active=True,
-            )
-            db.add(_dummy_user)
-            db.commit()
-            db.refresh(_dummy_user)
-    return _dummy_user
-
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
-    try:
-        if credentials:
-            token = credentials.credentials
-            payload = decode_token(token)
-            user = db.query(User).filter(User.id == int(payload["sub"])).first()
-            if user and user.is_active:
-                return user
-    except Exception:
-        pass
-    return _get_dummy_user(db)
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    payload = decode_token(credentials.credentials)
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Inactive or unknown user")
+    return user
 
 def require_role(allowed_roles: List[str]):
     async def role_checker(user: User = Depends(get_current_user)):
+        if user.role not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Insufficient role")
         return user
     return role_checker
+
+
+def get_or_create_default_council(db: Session) -> Council:
+    council = db.query(Council).order_by(Council.id.asc()).first()
+    if council:
+        return council
+    council = Council(name=DEFAULT_COUNCIL_NAME, deployment_id=str(uuid.uuid4()))
+    db.add(council)
+    db.commit()
+    db.refresh(council)
+    return council
+
+
+def backfill_default_council(db: Session, council: Council) -> None:
+    """Attach legacy demo records to the default council for the pilot baseline."""
+    changed = False
+    for model in (User, Document, BatchJob, AuditLog):
+        updated = (
+            db.query(model)
+            .filter(model.council_id.is_(None))
+            .update({"council_id": council.id}, synchronize_session=False)
+        )
+        changed = changed or updated > 0
+    if changed:
+        db.commit()
+
+
+def _ensure_user_council(db: Session, user: User) -> User:
+    if user.council_id is None:
+        council = get_or_create_default_council(db)
+        user.council_id = council.id
+        db.commit()
+        db.refresh(user)
+    return user
+
+
+def _get_document_or_404(db: Session, doc_id: int, user: User) -> Document:
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_user_council(db, user)
+    if doc.council_id is None:
+        doc.council_id = user.council_id
+        db.commit()
+        db.refresh(doc)
+    if doc.council_id != user.council_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+def _safe_file_response(path: Optional[str], media_type: Optional[str] = None, filename: Optional[str] = None):
+    if not path:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    requested = os.path.realpath(path)
+    allowed_roots = [os.path.realpath(UPLOAD_DIR), os.path.realpath(PROCESSED_DIR)]
+    if not any(requested == root or requested.startswith(root + os.sep) for root in allowed_roots):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not os.path.exists(requested):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(requested, media_type=media_type, filename=filename)
+
+
+def _redaction_source_image_path(doc: Document) -> Optional[str]:
+    """Return the rendered image used for coordinate-based redaction."""
+    if doc.original_path:
+        stem = Path(doc.original_path).stem
+        display = Path(PROCESSED_DIR) / f"{stem}_display.png"
+        if display.exists():
+            return str(display)
+
+        preprocessed = Path(PROCESSED_DIR) / f"{stem}_preprocessed.png"
+        if preprocessed.exists():
+            return str(preprocessed)
+
+        original_suffix = Path(doc.original_path).suffix.lower()
+        if original_suffix in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"} and os.path.exists(doc.original_path):
+            return doc.original_path
+
+    if doc.output_folder_path:
+        folder = Path(doc.output_folder_path)
+        for candidate in folder.glob("original.*"):
+            if candidate.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}:
+                return str(candidate)
+
+    return None
+
+
+def _normalise_bbox_payload(raw_bbox: str, image_path: Optional[str] = None) -> dict:
+    try:
+        payload = json.loads(raw_bbox)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid redaction box") from exc
+
+    bbox = payload.get("bbox") if isinstance(payload, dict) else payload
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        raise HTTPException(status_code=400, detail="Redaction box must contain four points")
+
+    points = []
+    for point in bbox:
+        if not isinstance(point, list) or len(point) != 2:
+            raise HTTPException(status_code=400, detail="Redaction box points must be [x, y]")
+        x, y = point
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            raise HTTPException(status_code=400, detail="Redaction box coordinates must be numbers")
+        if not math.isfinite(float(x)) or not math.isfinite(float(y)):
+            raise HTTPException(status_code=400, detail="Redaction box coordinates must be finite")
+        points.append((float(x), float(y)))
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+
+    if image_path:
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as image:
+                max_w, max_h = image.size
+            x0, x1 = max(0.0, x0), min(float(max_w), x1)
+            y0, y1 = max(0.0, y0), min(float(max_h), y1)
+        except Exception:
+            x0, x1 = max(0.0, x0), max(0.0, x1)
+            y0, y1 = max(0.0, y0), max(0.0, y1)
+    else:
+        x0, x1 = max(0.0, x0), max(0.0, x1)
+        y0, y1 = max(0.0, y0), max(0.0, y1)
+
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        raise HTTPException(status_code=400, detail="Redaction box is too small")
+
+    return {
+        "bbox": [
+            [round(x0, 2), round(y0, 2)],
+            [round(x1, 2), round(y0, 2)],
+            [round(x1, 2), round(y1, 2)],
+            [round(x0, 2), round(y1, 2)],
+        ]
+    }
+
+
+def _redaction_bbox_points(bbox: dict) -> Optional[list[list[float]]]:
+    points = bbox.get("bbox") if isinstance(bbox, dict) else None
+    if not points:
+        return None
+    try:
+        return [[float(point[0]), float(point[1])] for point in points]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _active_redaction_rows(db: Session, doc: Document) -> list[Redaction]:
+    return (
+        db.query(Redaction)
+        .filter(
+            Redaction.document_id == doc.id,
+            Redaction.status != "rejected",
+        )
+        .order_by(Redaction.id.asc())
+        .all()
+    )
+
+
+def _draw_redactions_on_image(image, redactions: list[Redaction], overlay: bool = False):
+    from PIL import Image, ImageDraw
+
+    base = image.convert("RGB")
+    if overlay:
+        rgba = base.convert("RGBA")
+        layer = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        fill = (220, 38, 38, 100)
+        outline = (127, 29, 29, 210)
+    else:
+        draw = ImageDraw.Draw(base)
+        fill = (0, 0, 0)
+        outline = None
+
+    for redaction in redactions:
+        points = _redaction_bbox_points(redaction.bbox or {})
+        if not points:
+            continue
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        rect = (min(xs), min(ys), max(xs), max(ys))
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+        draw.rectangle(rect, fill=fill, outline=outline, width=2 if outline else 1)
+
+    if overlay:
+        return Image.alpha_composite(rgba, layer).convert("RGB")
+    return base
+
+
+def _write_burned_redaction_image(db: Session, doc: Document, overlay: bool = False) -> str:
+    from PIL import Image
+
+    source_image_path = _redaction_source_image_path(doc)
+    if not source_image_path:
+        raise HTTPException(status_code=404, detail="No rendered image is available")
+
+    active_redactions = _active_redaction_rows(db, doc)
+    with Image.open(source_image_path) as source:
+        image = _draw_redactions_on_image(source, active_redactions, overlay=overlay)
+
+    out_folder = Path(doc.output_folder_path or Path(PROCESSED_DIR) / "exports" / f"doc_{doc.id}")
+    out_folder.mkdir(parents=True, exist_ok=True)
+    out_path = out_folder / ("redaction_preview_active.png" if overlay else "redacted_active.png")
+    image.save(out_path, "PNG", optimize=True)
+    if overlay:
+        doc.mask_path = str(out_path)
+    else:
+        doc.redacted_path = str(out_path)
+    db.commit()
+    return str(out_path)
+
+
+def _write_burned_redaction_pdf(db: Session, doc: Document) -> str:
+    """
+    Produce a raster PDF with redactions burned into pixels.
+
+    This intentionally does not preserve source PDF text layers, annotations, or
+    source metadata. It is a first-page export while the app's PDF pipeline is
+    first-page only.
+    """
+    from PIL import Image
+
+    source_image_path = _redaction_source_image_path(doc)
+    if not source_image_path:
+        raise HTTPException(status_code=404, detail="No rendered image is available for PDF export")
+
+    with Image.open(source_image_path) as source:
+        image = _draw_redactions_on_image(source, _active_redaction_rows(db, doc), overlay=False)
+
+    out_folder = Path(doc.output_folder_path or Path(PROCESSED_DIR) / "exports" / f"doc_{doc.id}")
+    out_folder.mkdir(parents=True, exist_ok=True)
+    out_path = out_folder / "redacted_document.pdf"
+    image.save(
+        out_path,
+        "PDF",
+        resolution=200.0,
+        title="",
+        author="",
+        subject="",
+        keywords="",
+        creator="Synthetiq Redact",
+        producer="Synthetiq Redact",
+    )
+    return str(out_path)
+
+
+def _redaction_response(redaction: Redaction, can_view_original_value: bool = True) -> dict:
+    return {
+        "id": redaction.id,
+        "type": redaction.redaction_type,
+        "redaction_type": redaction.redaction_type,
+        "original_value": redaction.original_value if can_view_original_value else None,
+        "masked_value": redaction.masked_value or f"[REDACTED-{redaction.redaction_type}]",
+        "visibility_mode": "full",
+        "bbox": redaction.bbox,
+        "confidence": redaction.confidence,
+        "method": redaction.method,
+        "status": redaction.status or "pending",
+    }
+
+
+def _safe_original_filename(filename: Optional[str]) -> str:
+    raw = Path(filename or "document").name
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", raw).strip(" .")
+    return cleaned[:120] or "document"
+
+
+def _extension_for_upload(filename: Optional[str]) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    return ext
+
+
+def _validate_upload_bytes(content: bytes, ext: str) -> None:
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty upload")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)}MB upload limit")
+    allowed = ALLOWED_MAGIC.get(ext, ())
+    if allowed and not any(content.startswith(prefix) for prefix in allowed):
+        raise HTTPException(status_code=400, detail="File content does not match its extension")
+
+
+def _scan_uploaded_file(path: str) -> None:
+    command_template = os.environ.get("SYNTHETIQ_MALWARE_SCAN_COMMAND", "").strip()
+    if not command_template:
+        return
+    command = shlex.split(command_template) + [path]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="Upload failed malware scan")
+
+
+async def _store_upload(file: UploadFile, user: User) -> tuple[str, str, str]:
+    ext = _extension_for_upload(file.filename)
+    source_filename = _safe_original_filename(file.filename)
+    storage_key = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{ext}"
+    council_prefix = f"council_{user.council_id or 'default'}"
+    target_dir = os.path.join(UPLOAD_DIR, council_prefix)
+    os.makedirs(target_dir, exist_ok=True)
+    file_path = os.path.join(target_dir, storage_key)
+
+    content = await file.read()
+    _validate_upload_bytes(content, ext)
+    with open(file_path, "wb") as f:
+        f.write(content)
+    _scan_uploaded_file(file_path)
+    return file_path, source_filename, storage_key
 
 
 # ============================================================================
@@ -134,6 +482,12 @@ def require_role(allowed_roles: List[str]):
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    db = SessionLocal()
+    try:
+        council = get_or_create_default_council(db)
+        backfill_default_council(db, council)
+    finally:
+        db.close()
     print("[startup] Initialising Synthetiq Redact v2.0...")
     
     app.state.ocr_engine = OCREngineManager()
@@ -171,21 +525,32 @@ async def register(
     role: str = Form("processor"),
     db: Session = Depends(get_db)
 ):
-    """Register a new user."""
+    """Bootstrap the first user or register users when explicitly enabled."""
+    public_register = os.environ.get("ALLOW_PUBLIC_REGISTER", "0") == "1"
+    user_count = db.query(User).count()
+    if user_count > 0 and not public_register:
+        raise HTTPException(status_code=403, detail="Public registration is disabled; ask an admin to create the user.")
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    if user_count == 0:
+        role = "admin"
+
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
+    council = get_or_create_default_council(db)
     user = User(
         email=email,
         hashed_password=hash_password(password),
         role=role,
+        council_id=council.id,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
     
-    token = create_token(user.id, user.email, user.role)
+    token = create_token(user.id, user.email, user.role, user.council_id)
     return {"token": token, "user": {"id": user.id, "email": user.email, "role": user.role}}
 
 
@@ -199,31 +564,41 @@ async def login(
     user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    token = create_token(user.id, user.email, user.role)
-    return {"token": token, "user": {"id": user.id, "email": user.email, "role": user.role}}
+
+    user = _ensure_user_council(db, user)
+    token = create_token(user.id, user.email, user.role, user.council_id)
+    return {"token": token, "user": {"id": user.id, "email": user.email, "role": user.role, "council_id": user.council_id}}
+
+
+@app.post("/api/auth/logout")
+async def logout(user: User = Depends(get_current_user)):
+    """Bearer-token logout placeholder for frontend session clearing."""
+    return {"message": "Logged out"}
 
 
 @app.get("/api/auth/me")
 async def get_me(user: User = Depends(get_current_user)):
     """Get current user info."""
-    return {"id": user.id, "email": user.email, "role": user.role, "department": user.department}
+    return {"id": user.id, "email": user.email, "role": user.role, "department": user.department, "council_id": user.council_id}
 
 
 # ============================================================================
 # USERS (Admin only)
 # ============================================================================
 
+@app.get("/api/admin/users")
 @app.get("/api/users")
 async def list_users(
     db: Session = Depends(get_db),
     admin: User = Depends(require_role(["admin"]))
 ):
     """List all users."""
-    users = db.query(User).all()
-    return [{"id": u.id, "email": u.email, "role": u.role, "department": u.department, "is_active": u.is_active} for u in users]
+    admin = _ensure_user_council(db, admin)
+    users = db.query(User).filter(User.council_id == admin.council_id).all()
+    return [{"id": u.id, "email": u.email, "role": u.role, "department": u.department, "is_active": u.is_active, "council_id": u.council_id} for u in users]
 
 
+@app.post("/api/admin/users")
 @app.post("/api/users")
 async def create_user(
     email: str = Form(...),
@@ -234,21 +609,52 @@ async def create_user(
     admin: User = Depends(require_role(["admin"]))
 ):
     """Create a new user."""
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
     existing = db.query(User).filter(User.email == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
+    admin = _ensure_user_council(db, admin)
     user = User(
         email=email,
         hashed_password=hash_password(password),
         role=role,
         department=department or None,
+        council_id=admin.council_id,
     )
     db.add(user)
     db.commit()
     return {"id": user.id, "email": user.email, "role": user.role}
 
 
+@app.patch("/api/admin/users/{user_id}")
+async def update_user(
+    user_id: int,
+    role: Optional[str] = Form(None),
+    department: Optional[str] = Form(None),
+    active: Optional[bool] = Form(None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role(["admin"]))
+):
+    """Update a user within the current council."""
+    admin = _ensure_user_council(db, admin)
+    user = db.query(User).filter(User.id == user_id, User.council_id == admin.council_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if role is not None:
+        if role not in VALID_ROLES:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        user.role = role
+    if department is not None:
+        user.department = department or None
+    if active is not None:
+        user.is_active = active
+    db.commit()
+    return {"id": user.id, "email": user.email, "role": user.role, "department": user.department, "is_active": user.is_active}
+
+
+@app.delete("/api/admin/users/{user_id}")
 @app.delete("/api/users/{user_id}")
 async def delete_user(
     user_id: int,
@@ -256,7 +662,8 @@ async def delete_user(
     admin: User = Depends(require_role(["admin"]))
 ):
     """Deactivate a user."""
-    user = db.query(User).filter(User.id == user_id).first()
+    admin = _ensure_user_council(db, admin)
+    user = db.query(User).filter(User.id == user_id, User.council_id == admin.council_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     user.is_active = False
@@ -268,33 +675,32 @@ async def delete_user(
 # DOCUMENT UPLOAD & PROCESSING (v2)
 # ============================================================================
 
+@app.post("/api/documents")
 @app.post("/api/upload")
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     translate: str = Form("0"),
     selected_category: str = Form(""),
+    category: str = Form(""),
     redaction_profile: str = Form("standard"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Upload a document and start processing."""
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in (".png", ".jpg", ".jpeg", ".pdf", ".gif", ".bmp", ".tiff"):
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    safe_name = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-    file_path = os.path.join(UPLOAD_DIR, safe_name)
-
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    user = _ensure_user_council(db, user)
+    file_path, source_filename, storage_key = await _store_upload(file, user)
+    effective_category = selected_category or category
 
     doc = Document(
-        filename=file.filename,
+        council_id=user.council_id,
+        uploaded_by=user.id,
+        filename=source_filename,
+        source_filename=source_filename,
         original_path=file_path,
+        storage_key=storage_key,
         status="uploaded",
-        selected_category=selected_category or None,
+        selected_category=effective_category or None,
         redaction_profile=redaction_profile,
     )
     db.add(doc)
@@ -302,12 +708,12 @@ async def upload_document(
     db.refresh(doc)
 
     log_action(db, doc.id, "uploaded", user_id=user.id, details={
-        "filename": file.filename,
-        "path": file_path,
+        "filename": source_filename,
+        "storage_key": storage_key,
         "uploaded_by": user.email,
     })
 
-    translate_enabled = translate == "1"
+    translate_enabled = translate in ("1", "true", "True", "yes", "on")
     background_tasks.add_task(_run_pipeline, doc.id, translate_enabled, user.id)
 
     return {"document_id": doc.id, "status": "uploaded", "message": "Document queued for processing"}
@@ -322,6 +728,12 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
         # Log completion
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if doc:
+            if doc.status in ("error", "failed"):
+                log_action(db, doc.id, "processing_failed", user_id=user_id, details={
+                    "status": doc.status,
+                    "category": doc.category,
+                })
+                return
             log_action(db, doc.id, "processing_complete", user_id=user_id, details={
                 "status": doc.status,
                 "category": doc.category,
@@ -339,7 +751,8 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
         db.rollback()
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if doc:
-            doc.status = "error"
+            doc.status = "failed"
+            doc.needs_review_reason = str(e)[:1000]
             db.commit()
             log_action(db, doc.id, "error", user_id=user_id, details={"error": str(e)})
     finally:
@@ -350,6 +763,7 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
 # BATCH PROCESSING (v2)
 # ============================================================================
 
+@app.post("/api/batches")
 @app.post("/api/batch")
 async def create_batch(
     background_tasks: BackgroundTasks,
@@ -361,10 +775,12 @@ async def create_batch(
     user: User = Depends(get_current_user),
 ):
     """Create a batch processing job."""
+    user = _ensure_user_council(db, user)
     job_id = str(uuid.uuid4())
     
     job = BatchJob(
         id=job_id,
+        council_id=user.council_id,
         name=name or f"Batch {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         status="queued",
         total_docs=len(files),
@@ -377,19 +793,15 @@ async def create_batch(
     # Save files and create documents
     document_ids = []
     for file in files:
-        ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in (".png", ".jpg", ".jpeg", ".pdf"):
-            continue
-        
-        safe_name = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-        file_path = os.path.join(UPLOAD_DIR, safe_name)
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        file_path, source_filename, storage_key = await _store_upload(file, user)
         
         doc = Document(
-            filename=file.filename,
+            council_id=user.council_id,
+            uploaded_by=user.id,
+            filename=source_filename,
+            source_filename=source_filename,
             original_path=file_path,
+            storage_key=storage_key,
             status="uploaded",
             redaction_profile=redaction_profile,
         )
@@ -426,7 +838,8 @@ async def _run_batch(job_id: str, document_ids: List[int], translate_enabled: bo
                 job.failed_docs += 1
                 doc = db.query(Document).filter(Document.id == doc_id).first()
                 if doc:
-                    doc.status = "error"
+                    doc.status = "failed"
+                    doc.needs_review_reason = str(e)[:1000]
             
             db.commit()
         
@@ -451,6 +864,7 @@ async def _run_batch(job_id: str, document_ids: List[int], translate_enabled: bo
         db.close()
 
 
+@app.get("/api/batches/{job_id}")
 @app.get("/api/batch/{job_id}")
 async def get_batch_status(
     job_id: str,
@@ -458,7 +872,8 @@ async def get_batch_status(
     user: User = Depends(get_current_user)
 ):
     """Get batch job status and progress."""
-    job = db.query(BatchJob).filter(BatchJob.id == job_id).first()
+    user = _ensure_user_council(db, user)
+    job = db.query(BatchJob).filter(BatchJob.id == job_id, BatchJob.council_id == user.council_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Batch job not found")
     
@@ -492,7 +907,9 @@ async def get_review_queue(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Get documents needing review, sorted by urgency."""
+    user = _ensure_user_council(db, user)
     query = db.query(Document).filter(
+        Document.council_id == user.council_id,
         Document.flag_needs_review == True,
         Document.status.in_(["needs_review", "in_review"])
     )
@@ -527,6 +944,7 @@ async def get_review_queue(
     }
 
 
+@app.post("/api/documents/{doc_id}/assign")
 @app.post("/api/document/{doc_id}/assign-review")
 async def assign_review(
     doc_id: int,
@@ -534,9 +952,7 @@ async def assign_review(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Assign a document to the current user for review."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_document_or_404(db, doc_id, user)
     
     doc.status = "in_review"
     doc.reviewer_id = user.id
@@ -554,7 +970,11 @@ async def approve_redaction(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Approve a redaction."""
-    red = db.query(Redaction).filter(Redaction.id == redaction_id).first()
+    user = _ensure_user_council(db, user)
+    red = db.query(Redaction).join(Document).filter(
+        Redaction.id == redaction_id,
+        Document.council_id == user.council_id,
+    ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
     
@@ -588,7 +1008,11 @@ async def reject_redaction(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Reject a redaction (remove it)."""
-    red = db.query(Redaction).filter(Redaction.id == redaction_id).first()
+    user = _ensure_user_council(db, user)
+    red = db.query(Redaction).join(Document).filter(
+        Redaction.id == redaction_id,
+        Document.council_id == user.council_id,
+    ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
     
@@ -616,6 +1040,175 @@ async def reject_redaction(
     return {"message": "Redaction rejected"}
 
 
+@app.post("/api/documents/{doc_id}/redactions")
+@app.post("/api/document/{doc_id}/redactions")
+async def create_manual_redaction(
+    doc_id: int,
+    bbox: str = Form(...),
+    redaction_type: str = Form("manual"),
+    reason: str = Form("Manual redaction"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["reviewer", "admin"]))
+):
+    """Create a reviewer-drawn manual redaction box."""
+    doc = _get_document_or_404(db, doc_id, user)
+    source_image_path = _redaction_source_image_path(doc)
+    normalised_bbox = _normalise_bbox_payload(bbox, source_image_path)
+    clean_type = re.sub(r"[^a-z0-9_]+", "_", redaction_type.lower()).strip("_")[:40] or "manual"
+
+    redaction = Redaction(
+        document_id=doc.id,
+        redaction_type=clean_type,
+        original_value=None,
+        masked_value=f"[REDACTED-{clean_type}]",
+        bbox=normalised_bbox,
+        confidence=1.0,
+        method="manual",
+        status="pending",
+        reviewer_id=user.id,
+        review_reason=reason,
+    )
+    db.add(redaction)
+    doc.flag_needs_review = True
+    if doc.status not in ("review_approved", "exported"):
+        doc.status = "in_review"
+    doc.reviewer_id = user.id
+    db.commit()
+    db.refresh(redaction)
+
+    review = RedactionReview(
+        redaction_id=redaction.id,
+        document_id=doc.id,
+        reviewer_id=user.id,
+        decision="created",
+        previous_bbox=None,
+        new_bbox=redaction.bbox,
+        previous_type=None,
+        new_type=redaction.redaction_type,
+        reason=reason,
+    )
+    db.add(review)
+    log_action(db, doc.id, "manual_redaction_created", user_id=user.id, details={
+        "redaction_id": redaction.id,
+        "type": redaction.redaction_type,
+    })
+    db.commit()
+
+    return _redaction_response(redaction)
+
+
+@app.post("/api/documents/{doc_id}/redactions/from-text")
+@app.post("/api/document/{doc_id}/redactions/from-text")
+async def create_text_redaction(
+    doc_id: int,
+    selected_text: str = Form(...),
+    selection_start: Optional[int] = Form(None),
+    selection_end: Optional[int] = Form(None),
+    redaction_type: str = Form("manual"),
+    reason: str = Form("Text selection redaction"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["reviewer", "admin"]))
+):
+    """Create redaction boxes from selected OCR text."""
+    doc = _get_document_or_404(db, doc_id, user)
+    ocr = (
+        db.query(OCRResult)
+        .filter(OCRResult.document_id == doc.id)
+        .order_by(OCRResult.id.desc())
+        .first()
+    )
+    if not ocr or not ocr.extracted_text or not ocr.words:
+        raise HTTPException(status_code=400, detail="OCR text is not available for this document")
+
+    text = ocr.extracted_text
+    raw_value = selected_text.strip()
+    if len(raw_value) < 2:
+        raise HTTPException(status_code=400, detail="Select text before redacting")
+
+    start = selection_start
+    end = selection_end
+    if start is not None and end is not None:
+        start = max(0, min(int(start), len(text)))
+        end = max(0, min(int(end), len(text)))
+        if end < start:
+            start, end = end, start
+        value = text[start:end].strip()
+        if len(value) < 2:
+            raise HTTPException(status_code=400, detail="Selected text is too short")
+        leading = len(text[start:end]) - len(text[start:end].lstrip())
+        trailing = len(text[start:end]) - len(text[start:end].rstrip())
+        start += leading
+        end -= trailing
+        value = text[start:end]
+    else:
+        collapsed = re.sub(r"\s+", " ", raw_value)
+        flat = re.sub(r"\s+", " ", text)
+        found = flat.lower().find(collapsed.lower())
+        if found < 0:
+            raise HTTPException(status_code=400, detail="Selected text could not be mapped to OCR coordinates")
+        prefix = flat[:found]
+        start = len(prefix)
+        end = start + len(collapsed)
+        value = text[start:end]
+
+    clean_type = re.sub(r"[^a-z0-9_]+", "_", redaction_type.lower()).strip("_")[:40] or "manual"
+    span = {
+        "type": clean_type,
+        "start": start,
+        "end": end,
+        "value": value,
+        "confidence": 1.0,
+        "method": "text_selection",
+    }
+    redaction_meta = app.state.redaction_engine.map_to_bboxes([span], ocr.words)
+    if not redaction_meta or not redaction_meta[0].get("bboxes"):
+        raise HTTPException(status_code=400, detail="Selected text could not be mapped to document boxes")
+
+    created: list[Redaction] = []
+    for red in redaction_meta:
+        for box in red.get("bboxes", []):
+            redaction = Redaction(
+                document_id=doc.id,
+                redaction_type=clean_type,
+                original_value=value[:255],
+                masked_value=f"[REDACTED-{clean_type}]",
+                bbox={"bbox": box["bbox"]},
+                confidence=red.get("confidence", 1.0),
+                method="text_selection",
+                status="pending",
+                reviewer_id=user.id,
+                review_reason=reason,
+            )
+            db.add(redaction)
+            created.append(redaction)
+
+    doc.flag_needs_review = True
+    if doc.status not in ("review_approved", "exported"):
+        doc.status = "in_review"
+    doc.reviewer_id = user.id
+    db.commit()
+    for redaction in created:
+        db.refresh(redaction)
+        db.add(RedactionReview(
+            redaction_id=redaction.id,
+            document_id=doc.id,
+            reviewer_id=user.id,
+            decision="created",
+            previous_bbox=None,
+            new_bbox=redaction.bbox,
+            previous_type=None,
+            new_type=redaction.redaction_type,
+            reason=reason,
+        ))
+    log_action(db, doc.id, "text_redaction_created", user_id=user.id, details={
+        "count": len(created),
+        "type": clean_type,
+    })
+    db.commit()
+
+    return {"redactions": [_redaction_response(redaction) for redaction in created]}
+
+
 @app.post("/api/redactions/{redaction_id}/modify")
 async def modify_redaction(
     redaction_id: int,
@@ -626,7 +1219,11 @@ async def modify_redaction(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Modify a redaction's bbox or type."""
-    red = db.query(Redaction).filter(Redaction.id == redaction_id).first()
+    user = _ensure_user_council(db, user)
+    red = db.query(Redaction).join(Document).filter(
+        Redaction.id == redaction_id,
+        Document.council_id == user.council_id,
+    ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
     
@@ -666,9 +1263,7 @@ async def approve_all_redactions(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Approve all pending redactions for a document."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_document_or_404(db, doc_id, user)
     
     reds = db.query(Redaction).filter(
         Redaction.document_id == doc_id,
@@ -680,7 +1275,9 @@ async def approve_all_redactions(
         red.reviewer_id = user.id
         red.reviewed_at = datetime.now(timezone.utc)
     
-    doc.status = "review_approved"
+    if doc.status not in ("review_approved", "exported"):
+        doc.status = "in_review"
+    doc.flag_needs_review = True
     doc.reviewer_id = user.id
     doc.reviewed_at = datetime.now(timezone.utc)
     db.commit()
@@ -698,6 +1295,8 @@ async def approve_all_redactions(
 
 async def _emit_webhook(db: Session, event: str, payload: dict):
     """Emit webhook event to all configured webhooks."""
+    if not WEBHOOKS_ENABLED:
+        return
     webhooks = db.query(Webhook).filter(
         Webhook.active == True,
     ).all()
@@ -732,6 +1331,8 @@ async def create_webhook(
     user: User = Depends(require_role(["admin"]))
 ):
     """Create a webhook."""
+    if not WEBHOOKS_ENABLED:
+        raise HTTPException(status_code=403, detail="Webhooks are disabled for the pilot baseline")
     events_list = json.loads(events)
     
     wh = Webhook(
@@ -753,6 +1354,8 @@ async def list_webhooks(
     user: User = Depends(require_role(["admin"]))
 ):
     """List all webhooks."""
+    if not WEBHOOKS_ENABLED:
+        return []
     webhooks = db.query(Webhook).all()
     return [{"id": w.id, "url": w.url, "events": w.events, "active": w.active} for w in webhooks]
 
@@ -764,6 +1367,8 @@ async def delete_webhook(
     user: User = Depends(require_role(["admin"]))
 ):
     """Delete a webhook."""
+    if not WEBHOOKS_ENABLED:
+        raise HTTPException(status_code=403, detail="Webhooks are disabled for the pilot baseline")
     wh = db.query(Webhook).filter(Webhook.id == webhook_id).first()
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
@@ -783,23 +1388,28 @@ async def get_dashboard_analytics(
     user: User = Depends(get_current_user)
 ):
     """Get analytics dashboard data."""
+    user = _ensure_user_council(db, user)
     from_date = datetime.now(timezone.utc) - timedelta(days=days)
     
     # Total documents
-    total_docs = db.query(Document).filter(Document.created_at >= from_date).count()
+    base_filter = (
+        Document.council_id == user.council_id,
+        Document.created_at >= from_date,
+    )
+    total_docs = db.query(Document).filter(*base_filter).count()
     
     # By status
     complete_docs = db.query(Document).filter(
-        Document.created_at >= from_date,
+        *base_filter,
         Document.status == "complete"
     ).count()
     review_docs = db.query(Document).filter(
-        Document.created_at >= from_date,
+        *base_filter,
         Document.status.in_(["needs_review", "in_review"])
     ).count()
     error_docs = db.query(Document).filter(
-        Document.created_at >= from_date,
-        Document.status == "error"
+        *base_filter,
+        Document.status.in_(["error", "failed"])
     ).count()
     
     # Auto-approval rate
@@ -808,22 +1418,22 @@ async def get_dashboard_analytics(
     
     # Redaction stats
     total_redactions = db.query(Redaction).join(Document).filter(
-        Document.created_at >= from_date
+        *base_filter
     ).count()
     
     approved_redactions = db.query(Redaction).join(Document).filter(
-        Document.created_at >= from_date,
+        *base_filter,
         Redaction.status == "approved"
     ).count()
     
     rejected_redactions = db.query(Redaction).join(Document).filter(
-        Document.created_at >= from_date,
+        *base_filter,
         Redaction.status == "rejected"
     ).count()
     
     # Safeguarding alerts
     safeguarding_docs = db.query(Document).filter(
-        Document.created_at >= from_date,
+        *base_filter,
         Document.risk_flags.isnot(None)
     ).count()
     
@@ -832,7 +1442,7 @@ async def get_dashboard_analytics(
     for cat in ["housing_repairs", "council_tax", "parking", "complaint", 
                 "waste", "adult_social_care", "children_safeguarding", "foi_legal"]:
         count = db.query(Document).filter(
-            Document.created_at >= from_date,
+            *base_filter,
             Document.category == cat
         ).count()
         if count > 0:
@@ -840,6 +1450,7 @@ async def get_dashboard_analytics(
     
     # Average processing time estimate (based on audit logs)
     audit_entries = db.query(AuditLog).filter(
+        AuditLog.council_id == user.council_id,
         AuditLog.timestamp >= from_date,
         AuditLog.action.in_(["uploaded", "processing_complete"])
     ).all()
@@ -864,15 +1475,26 @@ async def get_dashboard_analytics(
 # LEGACY ENDPOINTS (Keep for backwards compatibility)
 # ============================================================================
 
+@app.get("/api/documents/{doc_id}/progress")
 @app.get("/api/progress/{doc_id}")
-async def progress_stream(doc_id: int, db: Session = Depends(get_db)):
+async def progress_stream(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """SSE stream of document processing progress."""
+    authorized_doc = _get_document_or_404(db, doc_id, user)
+    authorized_council_id = authorized_doc.council_id
+
     async def event_generator():
         last_status = None
         while True:
             db_local = SessionLocal()
             try:
-                doc = db_local.query(Document).filter(Document.id == doc_id).first()
+                doc = db_local.query(Document).filter(
+                    Document.id == doc_id,
+                    Document.council_id == authorized_council_id,
+                ).first()
                 if not doc:
                     yield f"data: {json.dumps({'status': 'error', 'message': 'Document not found', 'percent': 0})}\n\n"
                     break
@@ -882,7 +1504,7 @@ async def progress_stream(doc_id: int, db: Session = Depends(get_db)):
                     message = STATUS_MESSAGES.get(doc.status, "Processing...")
                     payload = json.dumps({"status": doc.status, "message": message, "percent": percent})
                     yield f"data: {payload}\n\n"
-                if doc.status in ("complete", "error", "needs_review", "review_approved"):
+                if doc.status in ("complete", "error", "failed", "needs_review", "review_approved"):
                     break
             finally:
                 db_local.close()
@@ -904,11 +1526,12 @@ STATUS_PERCENT = {
     "in_review": 100,
     "review_approved": 100,
     "error": 100,
+    "failed": 100,
 }
 
 STATUS_MESSAGES = {
     "uploaded": "Document uploaded...",
-    "preprocessing": "Preprocessing image...",
+    "preprocessing": "Preprocessing document...",
     "ocr": "Extracting text with OCR...",
     "redaction": "Detecting and redacting sensitive data...",
     "translation": "Translating non-English text...",
@@ -919,9 +1542,11 @@ STATUS_MESSAGES = {
     "in_review": "Under human review...",
     "review_approved": "Review complete — approved",
     "error": "Processing failed",
+    "failed": "Processing failed",
 }
 
 
+@app.get("/api/documents/{doc_id}")
 @app.get("/api/document/{doc_id}")
 async def get_document(
     doc_id: int,
@@ -929,6 +1554,7 @@ async def get_document(
     user: User = Depends(get_current_user)
 ):
     """Get full document details with nested OCR and redactions."""
+    _get_document_or_404(db, doc_id, user)
     doc = (
         db.query(Document)
         .options(
@@ -936,14 +1562,15 @@ async def get_document(
             joinedload(Document.redactions),
             joinedload(Document.audit_logs),
         )
-        .filter(Document.id == doc_id)
+        .filter(Document.id == doc_id, Document.council_id == user.council_id)
         .first()
     )
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
     # Apply role-based redaction visibility
-    role = user.role if user else "public_facing"
+    role = user.role
+    can_view_original_value = role in {"admin", "reviewer", "dpo", "auditor"}
     
     ocr_data = None
     if doc.ocr_results:
@@ -964,7 +1591,7 @@ async def get_document(
         # Apply role-based partial masking
         from redaction import get_role_policy, PARTIAL_REDACTION_POLICIES
         mode = get_role_policy(role, r.redaction_type)
-        masked_value = r.original_value
+        masked_value = r.masked_value or r.original_value
         
         if mode == "partial" and r.original_value:
             policy = PARTIAL_REDACTION_POLICIES.get(r.redaction_type, {})
@@ -977,21 +1604,23 @@ async def get_document(
         redactions_data.append({
             "id": r.id,
             "type": r.redaction_type,
-            "original_value": r.original_value,
+            "redaction_type": r.redaction_type,
+            "original_value": r.original_value if can_view_original_value else None,
             "masked_value": masked_value,
             "visibility_mode": mode,
             "bbox": r.bbox,
             "confidence": r.confidence,
             "method": r.method,
-            "status": r.status,
+            "status": r.status or "pending",
         })
 
     return {
         "id": doc.id,
         "filename": doc.filename,
-        "original_path": doc.original_path,
-        "redacted_path": doc.redacted_path,
-        "mask_path": doc.mask_path,
+        "source_filename": doc.source_filename,
+        "has_original": bool(doc.original_path),
+        "has_redacted": bool(doc.redacted_path),
+        "has_mask": bool(doc.mask_path),
         "status": doc.status,
         "category": doc.category,
         "department": doc.department,
@@ -1002,12 +1631,17 @@ async def get_document(
         "language_detected": doc.language_detected,
         "translated": doc.translated,
         "flag_needs_review": doc.flag_needs_review,
+        "confidence_summary": doc.confidence_summary,
+        "needs_review_reason": doc.needs_review_reason,
+        "retention_due_at": doc.retention_due_at.isoformat() if doc.retention_due_at else None,
         "selected_category": doc.selected_category,
         "redaction_profile": doc.redaction_profile,
-        "output_folder_path": doc.output_folder_path,
-        "transcription_clean_path": doc.transcription_clean_path,
-        "transcription_json_path": doc.transcription_json_path,
-        "redacted_docx_path": doc.redacted_docx_path,
+        "exports": {
+            "text": bool(doc.text_export_path),
+            "clean": bool(doc.transcription_clean_path),
+            "json": bool(doc.transcription_json_path),
+            "docx": bool(doc.redacted_docx_path),
+        },
         "handwriting_backend": doc.handwriting_backend,
         "handwriting_confidence": doc.handwriting_confidence,
         "handwriting_review_reason": doc.handwriting_review_reason,
@@ -1024,6 +1658,7 @@ async def get_document(
     }
 
 
+@app.get("/api/documents/{doc_id}/image")
 @app.get("/api/document/{doc_id}/image")
 async def get_document_image(
     doc_id: int,
@@ -1032,36 +1667,43 @@ async def get_document_image(
     user: User = Depends(get_current_user)
 ):
     """Serve original, redacted, or mask image."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_document_or_404(db, doc_id, user)
 
     if type == "original":
-        path = doc.original_path
+        path = _redaction_source_image_path(doc) or doc.original_path
     elif type == "redacted":
-        path = doc.redacted_path
+        path = _write_burned_redaction_image(db, doc, overlay=False)
     elif type == "mask":
-        path = doc.mask_path
+        path = _write_burned_redaction_image(db, doc, overlay=True)
     else:
         raise HTTPException(status_code=400, detail="Invalid image type")
 
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    return FileResponse(path)
+    return _safe_file_response(path)
 
 
+@app.get("/api/documents/{doc_id}/export")
 @app.get("/api/document/{doc_id}/export")
 async def export_document(
     doc_id: int,
-    type: str = Query("text", enum=["text", "clean", "json", "docx"]),
+    type: str = Query("text", enum=["text", "clean", "json", "docx", "pdf", "txt"]),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
     """Download a processed document export."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_document_or_404(db, doc_id, user)
+    normalized_type = "text" if type == "txt" else type
+    if normalized_type == "pdf":
+        pdf_path = _write_burned_redaction_pdf(db, doc)
+        response = _safe_file_response(
+            pdf_path,
+            media_type="application/pdf",
+            filename=f"document_{doc_id}_redacted.pdf",
+        )
+        doc.status = "exported" if doc.status == "review_approved" else doc.status
+        db.commit()
+        log_action(db, doc.id, "exported", user_id=user.id, details={"type": normalized_type})
+        return response
+
     export_map = {
         "text": (doc.text_export_path, "text/plain", f"document_{doc_id}_redacted.txt"),
         "clean": (doc.transcription_clean_path, "text/plain", f"document_{doc_id}_clean_transcription.txt"),
@@ -1072,12 +1714,15 @@ async def export_document(
             f"document_{doc_id}_redacted.docx",
         ),
     }
-    path, media_type, filename = export_map[type]
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail=f"{type} export not available")
-    return FileResponse(path, media_type=media_type, filename=filename)
+    path, media_type, filename = export_map[normalized_type]
+    response = _safe_file_response(path, media_type=media_type, filename=filename)
+    doc.status = "exported" if doc.status == "review_approved" else doc.status
+    db.commit()
+    log_action(db, doc.id, "exported", user_id=user.id, details={"type": normalized_type})
+    return response
 
 
+@app.post("/api/documents/{doc_id}/approve-release")
 @app.post("/api/document/{doc_id}/approve")
 async def approve_document(
     doc_id: int,
@@ -1085,16 +1730,14 @@ async def approve_document(
     user: User = Depends(require_role(["reviewer", "admin"]))
 ):
     """Approve a processed document."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    doc.status = "complete"
+    doc = _get_document_or_404(db, doc_id, user)
+    doc.status = "review_approved"
     doc.flag_needs_review = False
     doc.reviewer_id = user.id
     doc.reviewed_at = datetime.now(timezone.utc)
     db.commit()
-    log_action(db, doc.id, "approved", user_id=user.id)
-    return {"message": "Document approved", "status": "complete"}
+    log_action(db, doc.id, "release_approved", user_id=user.id)
+    return {"message": "Document approved for release", "status": "review_approved"}
 
 
 @app.post("/api/document/{doc_id}/review")
@@ -1104,9 +1747,7 @@ async def review_document(
     user: User = Depends(get_current_user)
 ):
     """Flag a document for human review."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_document_or_404(db, doc_id, user)
     doc.status = "needs_review"
     doc.flag_needs_review = True
     db.commit()
@@ -1125,7 +1766,8 @@ async def list_documents(
     user: User = Depends(get_current_user)
 ):
     """List all documents with summary fields and filtering."""
-    query = db.query(Document)
+    user = _ensure_user_council(db, user)
+    query = db.query(Document).filter(Document.council_id == user.council_id)
     
     if status != "all":
         query = query.filter(Document.status == status)
@@ -1161,9 +1803,39 @@ async def list_documents(
 
 
 @app.get("/api/departments")
-async def list_departments():
+async def list_departments(user: User = Depends(get_current_user)):
     """List department mappings."""
     return {"departments": DEPARTMENTS}
+
+
+@app.get("/api/audit/documents/{doc_id}")
+async def get_document_audit(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["admin", "auditor", "dpo", "reviewer"]))
+):
+    """Return the document audit trail and chain verification result."""
+    doc = _get_document_or_404(db, doc_id, user)
+    entries = db.query(AuditLog).filter(
+        AuditLog.document_id == doc.id,
+    ).order_by(AuditLog.timestamp.asc()).all()
+    return {
+        "document_id": doc.id,
+        "chain_valid": verify_audit_chain(db, doc.id),
+        "entries": [
+            {
+                "id": entry.id,
+                "action": entry.action,
+                "user_id": entry.user_id,
+                "details": entry.details or {},
+                "previous_hash": entry.previous_hash,
+                "chain_hash": entry.chain_hash,
+                "signature": entry.signature,
+                "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
+            }
+            for entry in entries
+        ],
+    }
 
 
 @app.get("/health")

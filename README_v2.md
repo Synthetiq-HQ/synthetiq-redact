@@ -2,7 +2,7 @@
 
 ## 🚀 What Changed
 
-This is a **major version upgrade** transforming the hackathon MVP into a production-grade document redaction platform.
+This is a major upgrade path from the hackathon MVP toward a council-grade redaction assistant. It is not yet production ready, and final legal disclosure decisions must remain with council staff.
 
 ---
 
@@ -11,7 +11,7 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 ### Backend
 | File | Purpose |
 |------|---------|
-| `main_v2.py` | New FastAPI app with auth, batch processing, review workflow, webhooks, analytics |
+| `main.py` / `main_v2.py` | Default FastAPI V2 app with auth, batch processing, review workflow, audit, and analytics |
 | `models_v2.py` | Extended database schema with Users, BatchJobs, RedactionReviews, Webhooks, RetentionPolicies |
 | `database_v2.py` | Updated database initialization for new schema |
 | `ocr_engine_v2.py` | Multi-engine OCR (PaddleOCR primary + EasyOCR fallback) with layout analysis |
@@ -31,7 +31,9 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 ### Documentation
 | File | Purpose |
 |------|---------|
-| `ADVANCED_UPGRADE_PLAN.md` | Complete 40,000-word PRD with all 10 phases |
+| `docs/ROADMAP.md` | Production-readiness roadmap |
+| `docs/SECURITY_ARCHITECTURE.md` | Security baseline and production gaps |
+| `docs/compliance/` | DPIA, model card, human review, retention, and licence templates |
 
 ---
 
@@ -47,7 +49,7 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 ### 2. Smart Redaction Engine
 - **Partial masking**: Show last 4 digits of phone, first 2 chars of email, etc.
 - **Role-based visibility**: Caseworkers see partial, public sees full, auditors see all
-- **Pattern learning**: Tracks human corrections and adjusts future redactions
+- **Correction capture foundation**: Review decisions are stored so they can become future benchmark cases
 - **Table structure preservation**: Redact cells without destroying table layout
 
 ### 3. Human Review Studio
@@ -56,7 +58,7 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 - **Click-to-inspect**: Click any redaction box to see details
 - **Approve/Reject/Modify**: Per-redaction decisions with full audit trail
 - **Batch approve**: "Approve All" for high-confidence documents
-- **Keyboard shortcuts**: Space = approve, Backspace = reject, arrows = navigate
+- **Keyboard shortcuts**: planned for reviewer efficiency
 
 ### 4. Batch Processing
 - **Multi-file upload**: Drop ZIP or select multiple files
@@ -68,7 +70,7 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 - **JWT Authentication**: Register/login with bcrypt + JWT tokens
 - **RBAC**: Role-based access control (admin, reviewer, processor, auditor, caseworker)
 - **Tamper-proof audit**: Chained hashes with HMAC signatures
-- **Webhook signatures**: HMAC-SHA256 signed webhook payloads
+- **Webhook signatures**: implemented but disabled by default for the pilot baseline
 
 ### 6. Analytics Dashboard
 - Processing volume, auto-approval rate, review stats
@@ -77,9 +79,8 @@ This is a **major version upgrade** transforming the hackathon MVP into a produc
 - Category breakdowns
 
 ### 7. Integration Ecosystem
-- **REST API v2**: 50+ new endpoints with OpenAPI docs
-- **Webhooks**: Configure URL + events with HMAC signing
-- **Zapier format**: Standard webhook payload for no-code platforms
+- **REST API v2**: secured document, review, batch, audit, analytics, and admin routes
+- **Webhooks**: disabled by default; enable only after threat review
 
 ---
 
@@ -116,18 +117,20 @@ python -c "from database_v2 import init_db; init_db()"
 
 ```bash
 cd backend
-uvicorn main_v2:app --host 127.0.0.1 --port 8000 --reload
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ### 4. Run Frontend
 
 ```bash
 cd frontend
-npm install  # Install new deps (react-router-dom, axios)
+npm install
 npm run dev
 ```
 
 ### 5. Create First Admin User
+
+Use the frontend "First setup" tab, or run:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/auth/register \
@@ -276,8 +279,10 @@ curl -X POST http://127.0.0.1:8000/api/auth/register \
 1. **PaddleOCR**: May fail on some Linux distributions without proper system libraries. Falls back to EasyOCR automatically.
 2. **BERT Model**: Uses `dslim/bert-base-NER` (general NER). For production, fine-tune on UK council documents.
 3. **SQLite**: Sufficient for v2.0 but PostgreSQL migration path documented for high volume.
-4. **Frontend**: v2 components use React Router. The original `App.jsx` is preserved; use `App_v2.jsx` for new features.
+4. **Frontend**: V2 is now the default frontend entrypoint.
 5. **Mobile**: Flutter app still experimental. React web app works on mobile browsers.
+6. **Security**: secure cookie auth, encryption at rest, bundled malware scanning, retention purge jobs, and full object-level tests are still required before production.
+7. **Reliability**: the current evaluation benchmark is not large enough for council trust.
 
 ---
 
@@ -288,7 +293,10 @@ curl -X POST http://127.0.0.1:8000/api/auth/register \
 - [ ] SharePoint/OneDrive connector
 - [ ] Forensic watermarking (DCT steganography)
 - [ ] Encrypted SQLite (SQLCipher)
-- [ ] Zapier/Make.com official integration
+- [ ] Secure cookie or short-lived token refresh flow
+- [ ] Encryption at rest
+- [ ] Retention purge jobs
+- [ ] Larger redaction benchmark
 
 ### Phase 3
 - [ ] Flutter mobile overhaul (camera guide, offline mode)
@@ -307,8 +315,8 @@ curl -X POST http://127.0.0.1:8000/api/auth/register \
 ## 📞 Support
 
 - **GitHub Issues**: [Synthetiq-HQ/synthetiq-redact](https://github.com/Synthetiq-HQ/synthetiq-redact)
-- **Documentation**: See `ADVANCED_UPGRADE_PLAN.md` for full technical specification
-- **API Docs**: Run backend and visit `/docs` for interactive OpenAPI docs
+- **Documentation**: See `docs/ROADMAP.md` and `docs/SECURITY_ARCHITECTURE.md`
+- **API Docs**: Run backend and visit `/docs` in development. Docs are disabled when `APP_ENV=production`.
 
 ---
 

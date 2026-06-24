@@ -7,7 +7,7 @@ const CATEGORY_LABELS = {
   adult_social_care: { label: 'Adult Social Care', icon: '🧑‍🤝‍🧑', color: 'bg-violet-100 text-violet-800 border-violet-200' },
   children_safeguarding: { label: "Children's Safeguarding", icon: '🛡️', color: 'bg-red-100 text-red-800 border-red-200' },
   foi_legal: { label: 'FOI / Legal', icon: '⚖️', color: 'bg-slate-100 text-slate-800 border-slate-200' },
-  translation: { label: 'Translation', icon: '🌐', color: 'bg-cyan-100 text-cyan-800 border-cyan-200' },
+  translation: { label: 'Language', icon: 'Aa', color: 'bg-cyan-100 text-cyan-800 border-cyan-200' },
   unknown: { label: 'Unknown', icon: '❓', color: 'bg-gray-100 text-gray-700 border-gray-200' },
 };
 
