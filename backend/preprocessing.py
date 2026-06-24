@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 MAX_DIMENSION = 2000  # Resize images larger than this before processing
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 PDF_RENDER_PAGE = int(os.environ.get("PDF_RENDER_PAGE", "1"))
+MAX_PDF_PAGES = int(os.environ.get("MAX_PDF_PAGES", "50"))
 
 
 def _float_env(name: str, default: float) -> float:
@@ -66,6 +68,44 @@ def _render_pdf_page(pdf_path: str):
 
     pil_img = pages[0].convert("RGB")
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
+def _pdf_page_count(pdf_path: str) -> int:
+    try:
+        from PyPDF2 import PdfReader
+        return len(PdfReader(pdf_path).pages)
+    except Exception as exc:
+        raise ValueError("PDF page count could not be read. Check that the file is valid.") from exc
+
+
+def _render_pdf_pages(pdf_path: str):
+    """Render every PDF page up to MAX_PDF_PAGES."""
+    try:
+        from pdf2image import convert_from_path
+    except ImportError as exc:
+        raise ValueError("PDF support requires pdf2image and Poppler.") from exc
+
+    page_count = _pdf_page_count(pdf_path)
+    if page_count > MAX_PDF_PAGES:
+        raise ValueError(
+            f"PDF has {page_count} pages. First iteration supports up to {MAX_PDF_PAGES}; split the PDF and upload again."
+        )
+
+    try:
+        pages = convert_from_path(
+            pdf_path,
+            dpi=PDF_RENDER_DPI,
+            first_page=1,
+            last_page=page_count,
+            fmt="png",
+            thread_count=1,
+        )
+    except Exception as exc:
+        raise ValueError("PDF could not be rendered. Check that the file is valid and Poppler is installed.") from exc
+
+    if not pages:
+        raise ValueError("PDF could not be rendered because it did not contain readable pages.")
+    return [cv2.cvtColor(np.array(page.convert("RGB")), cv2.COLOR_RGB2BGR) for page in pages]
 
 
 def _load_with_exif(image_path: str):
@@ -186,3 +226,50 @@ def preprocess_pipeline(image_path: str) -> str:
     logger.info("Display image saved: %s", display_path)
     logger.info("Preprocessed image saved: %s", out_path)
     return out_path
+
+
+def _write_page_derivatives(image: np.ndarray, out_dir: str, page_number: int) -> dict:
+    """Write original/display/OCR images for one page and return page metadata."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    stem = f"page_{page_number:04d}"
+
+    original_path = os.path.join(out_dir, f"{stem}_original.png")
+    display_path = os.path.join(out_dir, f"{stem}_display.png")
+    ocr_path = os.path.join(out_dir, f"{stem}_ocr.png")
+
+    cv2.imwrite(original_path, image)
+
+    display_image = _resize_if_needed(image)
+    display_image = deskew(display_image)
+    cv2.imwrite(display_path, display_image)
+
+    ocr_image = denoise(display_image.copy())
+    ocr_image = enhance_contrast(ocr_image)
+    ocr_image = sharpen(ocr_image)
+    cv2.imwrite(ocr_path, ocr_image)
+
+    height, width = display_image.shape[:2]
+    return {
+        "page_number": page_number,
+        "original_image_path": original_path,
+        "display_image_path": display_path,
+        "ocr_image_path": ocr_path,
+        "width": width,
+        "height": height,
+    }
+
+
+def render_document_pages(input_path: str, out_dir: str) -> list[dict]:
+    """Render an image/PDF upload into per-page images for processing and review."""
+    if _is_pdf(input_path):
+        images = _render_pdf_pages(input_path)
+    else:
+        image = _load_with_exif(input_path)
+        if image is None:
+            raise ValueError("Cannot load image. The file may be corrupt or unsupported.")
+        images = [image]
+
+    return [
+        _write_page_derivatives(image, out_dir, index + 1)
+        for index, image in enumerate(images)
+    ]

@@ -141,6 +141,7 @@ class Document(Base):
     review_notes: Mapped[Optional[str]] = Column(Text, nullable=True)
 
     # Relationships
+    pages: Mapped[List["DocumentPage"]] = relationship("DocumentPage", back_populates="document", cascade="all, delete-orphan", order_by="DocumentPage.page_number")
     ocr_results: Mapped[List["OCRResult"]] = relationship("OCRResult", back_populates="document", cascade="all, delete-orphan")
     redactions: Mapped[List["Redaction"]] = relationship("Redaction", back_populates="document", cascade="all, delete-orphan")
     audit_logs: Mapped[List["AuditLog"]] = relationship("AuditLog", back_populates="document", cascade="all, delete-orphan")
@@ -148,11 +149,38 @@ class Document(Base):
     batch_jobs = relationship("BatchJob", secondary=batch_job_documents, back_populates="documents")
 
 
+class DocumentPage(Base):
+    __tablename__ = "document_pages"
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)
+    document_id: Mapped[int] = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    page_number: Mapped[int] = Column(Integer, nullable=False, default=1)
+    original_image_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    display_image_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    ocr_image_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    redacted_image_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    mask_image_path: Mapped[Optional[str]] = Column(String, nullable=True)
+    width: Mapped[Optional[int]] = Column(Integer, nullable=True)
+    height: Mapped[Optional[int]] = Column(Integer, nullable=True)
+    ocr_confidence: Mapped[Optional[float]] = Column(Float, nullable=True)
+    vision_status: Mapped[Optional[str]] = Column(String, nullable=True, default="not_run")
+    vision_text: Mapped[Optional[str]] = Column(Text, nullable=True)
+    vision_items: Mapped[Optional[list]] = Column(JSON, nullable=True)
+    vision_warnings: Mapped[Optional[list]] = Column(JSON, nullable=True)
+    created_at: Mapped[datetime] = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    document: Mapped["Document"] = relationship("Document", back_populates="pages")
+    ocr_results: Mapped[List["OCRResult"]] = relationship("OCRResult", back_populates="page")
+    redactions: Mapped[List["Redaction"]] = relationship("Redaction", back_populates="page")
+
+
 class OCRResult(Base):
     __tablename__ = "ocr_results"
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
     document_id: Mapped[int] = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    page_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("document_pages.id", ondelete="CASCADE"), nullable=True)
+    page_number: Mapped[int] = Column(Integer, nullable=False, default=1)
     extracted_text: Mapped[str] = Column(Text, nullable=False)
     redacted_text: Mapped[Optional[str]] = Column(Text, nullable=True)
     translated_text: Mapped[Optional[str]] = Column(Text, nullable=True)
@@ -162,6 +190,7 @@ class OCRResult(Base):
     words: Mapped[Optional[list]] = Column(JSON, nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="ocr_results")
+    page: Mapped[Optional["DocumentPage"]] = relationship("DocumentPage", back_populates="ocr_results")
 
 
 class Redaction(Base):
@@ -169,6 +198,8 @@ class Redaction(Base):
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
     document_id: Mapped[int] = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    page_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("document_pages.id", ondelete="CASCADE"), nullable=True)
+    page_number: Mapped[int] = Column(Integer, nullable=False, default=1)
     redaction_type: Mapped[str] = Column(String, nullable=False)
     original_value: Mapped[Optional[str]] = Column(String, nullable=True)
     bbox: Mapped[Optional[dict]] = Column(JSON, nullable=True)
@@ -184,6 +215,7 @@ class Redaction(Base):
     review_reason: Mapped[Optional[str]] = Column(Text, nullable=True)
 
     document: Mapped["Document"] = relationship("Document", back_populates="redactions")
+    page: Mapped[Optional["DocumentPage"]] = relationship("DocumentPage", back_populates="redactions")
     reviews = relationship("RedactionReview", back_populates="redaction")
 
 
@@ -193,8 +225,13 @@ class RedactionReview(Base):
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)
     redaction_id: Mapped[int] = Column(Integer, ForeignKey("redactions.id", ondelete="CASCADE"), nullable=False)
     document_id: Mapped[int] = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    page_id: Mapped[Optional[int]] = Column(Integer, ForeignKey("document_pages.id", ondelete="CASCADE"), nullable=True)
+    page_number: Mapped[int] = Column(Integer, nullable=False, default=1)
     reviewer_id: Mapped[int] = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action_type: Mapped[Optional[str]] = Column(String, nullable=True)
     decision: Mapped[str] = Column(String, nullable=False)  # approved, rejected, modified
+    previous_status: Mapped[Optional[str]] = Column(String, nullable=True)
+    new_status: Mapped[Optional[str]] = Column(String, nullable=True)
     previous_bbox: Mapped[Optional[dict]] = Column(JSON, nullable=True)
     new_bbox: Mapped[Optional[dict]] = Column(JSON, nullable=True)
     previous_type: Mapped[Optional[str]] = Column(String, nullable=True)

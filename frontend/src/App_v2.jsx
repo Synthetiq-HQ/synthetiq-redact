@@ -12,7 +12,15 @@ import DocumentList from './components/DocumentList';
 import ReviewStudio from './components/ReviewStudio';
 import ReviewQueue from './components/ReviewQueue';
 import BatchDashboard from './components/BatchDashboard';
-import { clearAuthSession, getMe, getStoredUser, loginUser, logoutUser, registerUser } from './api';
+import {
+  MULTI_USER_AUTH_ENABLED,
+  clearAuthSession,
+  getMe,
+  getStoredUser,
+  loginUser,
+  logoutUser,
+  registerUser,
+} from './api';
 
 function AuthScreen({ onAuthenticated }) {
   const [mode, setMode] = useState('login');
@@ -213,13 +221,17 @@ function AppContent({ user, onLogout }) {
             </button>
             <div className="hidden items-center gap-2 border-l border-slate-700 pl-3 text-xs text-slate-300 sm:flex">
               <span>{user?.email}</span>
-              <span className="rounded bg-slate-800 px-2 py-1 uppercase text-slate-400">{user?.role}</span>
-              <button
-                onClick={onLogout}
-                className="rounded-lg bg-slate-800 px-3 py-2 font-medium text-slate-200 hover:bg-slate-700"
-              >
-                Sign out
-              </button>
+              <span className="rounded bg-slate-800 px-2 py-1 uppercase text-slate-400">
+                {MULTI_USER_AUTH_ENABLED ? user?.role : 'local'}
+              </span>
+              {MULTI_USER_AUTH_ENABLED && (
+                <button
+                  onClick={onLogout}
+                  className="rounded-lg bg-slate-800 px-3 py-2 font-medium text-slate-200 hover:bg-slate-700"
+                >
+                  Sign out
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -253,9 +265,20 @@ function AppContent({ user, onLogout }) {
 
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
-  const [user, setUser] = useState(getStoredUser());
+  const [user, setUser] = useState(
+    MULTI_USER_AUTH_ENABLED
+      ? getStoredUser()
+      : { id: 1, email: 'local_user', role: 'admin' }
+  );
 
   useEffect(() => {
+    if (!MULTI_USER_AUTH_ENABLED) {
+      clearAuthSession();
+      setUser({ id: 1, email: 'local_user', role: 'admin' });
+      setAuthChecked(true);
+      return undefined;
+    }
+
     let mounted = true;
     async function loadUser() {
       try {

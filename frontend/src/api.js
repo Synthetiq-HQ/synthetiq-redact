@@ -3,6 +3,7 @@ import axios from 'axios';
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000';
 const TOKEN_KEY = 'synthetiq_redact_token';
 const USER_KEY = 'synthetiq_redact_user';
+export const MULTI_USER_AUTH_ENABLED = import.meta.env.VITE_ENABLE_MULTI_USER_AUTH === '1';
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
@@ -58,8 +59,10 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      clearAuthSession();
-      window.dispatchEvent(new Event('synthetiq:auth-expired'));
+      if (MULTI_USER_AUTH_ENABLED) {
+        clearAuthSession();
+        window.dispatchEvent(new Event('synthetiq:auth-expired'));
+      }
     }
     return Promise.reject(error);
   }
@@ -150,12 +153,30 @@ export async function getDocument(docId) {
   return res.data;
 }
 
+export async function getDocumentPages(docId) {
+  const res = await api.get(`/document/${docId}/pages`);
+  return res.data;
+}
+
+export async function getDocumentPage(docId, pageNumber = 1) {
+  const res = await api.get(`/document/${docId}/pages/${pageNumber}`);
+  return res.data;
+}
+
 export function getImageUrl(docId, type = 'original') {
   return `${API_BASE}/api/document/${docId}/image?type=${type}`;
 }
 
 export async function getImageBlobUrl(docId, type = 'original') {
   const res = await api.get(`/document/${docId}/image`, {
+    params: { type },
+    responseType: 'blob',
+  });
+  return URL.createObjectURL(res.data);
+}
+
+export async function getPageImageBlobUrl(docId, pageNumber = 1, type = 'original') {
+  const res = await api.get(`/document/${docId}/pages/${pageNumber}/image`, {
     params: { type },
     responseType: 'blob',
   });
@@ -263,12 +284,12 @@ export async function modifyRedaction(redactionId, updates) {
   return res.data;
 }
 
-export async function createManualRedaction(docId, bbox, redactionType = 'manual', reason = '') {
+export async function createManualRedaction(docId, bbox, redactionType = 'manual', reason = '', pageNumber = 1) {
   const formData = new FormData();
   formData.append('bbox', JSON.stringify(bbox));
   formData.append('redaction_type', redactionType);
   formData.append('reason', reason);
-  const res = await api.post(`/document/${docId}/redactions`, formData, {
+  const res = await api.post(`/document/${docId}/pages/${pageNumber}/redactions`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
   return res.data;
@@ -280,6 +301,7 @@ export async function createTextRedaction(docId, {
   selectionEnd,
   redactionType = 'manual',
   reason = '',
+  pageNumber = 1,
 }) {
   const formData = new FormData();
   formData.append('selected_text', selectedText);
@@ -287,9 +309,24 @@ export async function createTextRedaction(docId, {
   if (Number.isFinite(selectionEnd)) formData.append('selection_end', String(selectionEnd));
   formData.append('redaction_type', redactionType);
   formData.append('reason', reason);
-  const res = await api.post(`/document/${docId}/redactions/from-text`, formData, {
+  const res = await api.post(`/document/${docId}/pages/${pageNumber}/redactions/from-text`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
+  return res.data;
+}
+
+export async function getDocumentHistory(docId) {
+  const res = await api.get(`/document/${docId}/history`);
+  return res.data;
+}
+
+export async function undoLastAction(docId) {
+  const res = await api.post(`/document/${docId}/undo-last`);
+  return res.data;
+}
+
+export async function verifyExport(docId) {
+  const res = await api.post(`/document/${docId}/verify-export`);
   return res.data;
 }
 

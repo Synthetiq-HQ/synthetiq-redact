@@ -19,8 +19,9 @@ It assists redaction review. It does not make final legal disclosure decisions, 
 - Detect urgency, sentiment, and safeguarding risk.
 - Export redacted images, text, JSON metadata, and DOCX files.
 - Keep full audit trails in SQLite.
-- Require staff sign-in for document, image, export, review, batch, audit, analytics, and admin routes.
-- Support a single-council pilot boundary with role-based review/admin actions.
+- Run as single-user local software by default, with no visible login screen.
+- Keep multi-user authentication available behind `ENABLE_MULTI_USER_AUTH=1`.
+- Support multi-page PDFs up to the configured `MAX_PDF_PAGES` cap.
 
 ## Local-Only AI
 
@@ -32,6 +33,7 @@ Current local components:
 - **spaCy** for local entity recognition.
 - **Helsinki-NLP MarianMT** for local translation fallback.
 - **Ollama/Qwen** optional local LLM support for classification, translation, and PII detection.
+- **Ollama/Gemma vision verifier** optional page-level vision cross-checking through `VISION_VERIFIER_MODEL` (default `gemma4:e4b-it-qat`).
 - **MLX-VLM/Qwen2.5-VL** optional local handwriting transcription path for Apple Silicon.
 
 No Google Cloud Vision, AWS Textract, Azure OCR, OpenAI Vision, or paid cloud OCR is required.
@@ -76,10 +78,10 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
-uvicorn main:app --host 127.0.0.1 --port 8000
+uvicorn main_v2:app --host 127.0.0.1 --port 8000
 ```
 
-`backend/main.py` now loads the secured V2 app. On first launch, create the first admin account from the frontend "First setup" tab.
+The default mode is single-user local mode. The backend creates/reuses a local user automatically and the frontend opens directly to the document workspace. To re-enable the older login/admin flow, start the backend with `ENABLE_MULTI_USER_AUTH=1` and the frontend with `VITE_ENABLE_MULTI_USER_AUTH=1`.
 
 ### Frontend
 
@@ -152,6 +154,7 @@ Latest local validation before release:
 - [Retention and deletion policy](docs/compliance/RETENTION_AND_DELETION.md)
 - [Model card](docs/compliance/MODEL_CARD.md)
 - [Handwriting data strategy](docs/HANDWRITING_DATA_STRATEGY.md)
+- [Phone scanner plan](docs/PHONE_SCANNER_PLAN.md)
 - [Licence matrix](docs/compliance/LICENSE_MATRIX.md)
 - [Supplier/subprocessor statement](docs/compliance/SUPPLIER_SUBPROCESSOR_STATEMENT.md)
 
@@ -163,9 +166,9 @@ The repository only includes synthetic demo documents. Runtime uploads, processe
 
 - EasyOCR is weak on messy handwriting.
 - The visual handwriting fallback protects likely sensitive regions but can over-redact.
-- PDF uploads are currently rendered as page 1 for OCR/redaction and are forced into human review; full multi-page PDF redaction is still required before production.
+- PDF uploads render page images for every page up to `MAX_PDF_PAGES` (default 50); larger PDFs must be split before upload.
 - Human review is required for low-confidence handwriting, safeguarding, unknown, and legal/FOI-style documents.
-- The current auth baseline uses browser session storage for bearer tokens; production should move to secure HTTP-only cookies with CSRF or short-lived access tokens plus refresh rotation.
+- The default local mode has no login screen; multi-user council deployments still need a hardened session strategy before production.
 - Encryption at rest, bundled malware scanning, retention purge jobs, full Alembic migrations, backup/restore runbooks, and council deployment packaging are still required before production.
 - The current benchmark is too small and synthetic-heavy for council trust.
 

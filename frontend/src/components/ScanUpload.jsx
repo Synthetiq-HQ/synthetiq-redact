@@ -172,7 +172,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
                 PDF
               </div>
               <div className="max-w-full truncate text-sm font-semibold text-slate-800">{file.name}</div>
-              <div className="text-xs text-slate-500">PDF processing currently renders page 1 and sends the result to human review.</div>
+              <div className="text-xs text-slate-500">PDF processing renders up to 50 pages and sends issues to human review.</div>
             </div>
           )}
           <button onClick={resetSelectedFile}

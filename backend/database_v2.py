@@ -10,6 +10,7 @@ def init_db():
     """Create all tables and apply lightweight SQLite migrations."""
     Base.metadata.create_all(bind=engine)
     _apply_sqlite_migrations()
+    _backfill_document_pages()
 
 
 def _apply_sqlite_migrations():
@@ -51,12 +52,25 @@ def _apply_sqlite_migrations():
             "user_id": "INTEGER",
         },
         "redactions": {
+            "page_id": "INTEGER",
+            "page_number": "INTEGER DEFAULT 1",
             "status": "VARCHAR DEFAULT 'pending'",
             "partial_mode": "VARCHAR",
             "masked_value": "VARCHAR",
             "reviewer_id": "INTEGER",
             "reviewed_at": "DATETIME",
             "review_reason": "TEXT",
+        },
+        "ocr_results": {
+            "page_id": "INTEGER",
+            "page_number": "INTEGER DEFAULT 1",
+        },
+        "redaction_reviews": {
+            "page_id": "INTEGER",
+            "page_number": "INTEGER DEFAULT 1",
+            "action_type": "VARCHAR",
+            "previous_status": "VARCHAR",
+            "new_status": "VARCHAR",
         },
     }
 
@@ -70,6 +84,49 @@ def _apply_sqlite_migrations():
                 if column_name not in existing_names:
                     conn.exec_driver_sql(
                         f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                    )
+
+
+def _backfill_document_pages():
+    """Create page 1 rows for legacy documents and attach legacy rows."""
+    if not DB_PATH.endswith(".sqlite3"):
+        return
+    with engine.begin() as conn:
+        tables = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = {row[0] for row in tables}
+        if "documents" not in table_names or "document_pages" not in table_names:
+            return
+
+        docs = conn.exec_driver_sql(
+            "SELECT id, original_path, redacted_path, mask_path FROM documents"
+        ).fetchall()
+        for doc_id, original_path, redacted_path, mask_path in docs:
+            existing = conn.exec_driver_sql(
+                "SELECT id FROM document_pages WHERE document_id = ? AND page_number = 1",
+                (doc_id,),
+            ).fetchone()
+            if existing:
+                page_id = existing[0]
+            else:
+                conn.exec_driver_sql(
+                    """
+                    INSERT INTO document_pages (
+                        document_id, page_number, original_image_path,
+                        display_image_path, ocr_image_path, redacted_image_path,
+                        mask_image_path, vision_status
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?, 'not_run')
+                    """,
+                    (doc_id, original_path, original_path, original_path, redacted_path, mask_path),
+                )
+                page_id = conn.exec_driver_sql("SELECT last_insert_rowid()").scalar()
+
+            for table in ("ocr_results", "redactions", "redaction_reviews"):
+                if table in table_names:
+                    conn.exec_driver_sql(
+                        f"UPDATE {table} SET page_id = ?, page_number = 1 WHERE document_id = ? AND page_id IS NULL",
+                        (page_id, doc_id),
                     )
 
 def get_db():

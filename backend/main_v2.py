@@ -24,7 +24,7 @@ import jwt
 from config import UPLOAD_DIR, PROCESSED_DIR, DB_PATH, DEPARTMENTS
 from database_v2 import init_db, get_db, SessionLocal
 from models_v2 import (
-    Document, OCRResult, Redaction, AuditLog,
+    Document, DocumentPage, OCRResult, Redaction, AuditLog,
     User, Council, BatchJob, RedactionReview, Webhook, RetentionPolicy,
     batch_job_documents
 )
@@ -60,6 +60,8 @@ ALLOWED_MAGIC = {
 }
 VALID_ROLES = {"admin", "reviewer", "processor", "auditor", "dpo", "caseworker"}
 DEFAULT_COUNCIL_NAME = os.environ.get("DEFAULT_COUNCIL_NAME", "Pilot Council")
+ENABLE_MULTI_USER_AUTH = os.environ.get("ENABLE_MULTI_USER_AUTH", "0") == "1"
+LOCAL_USER_EMAIL = os.environ.get("LOCAL_USER_EMAIL", "local_user@synthetiq.local")
 WEBHOOKS_ENABLED = os.environ.get("ENABLE_WEBHOOKS", "0") == "1"
 CORS_ORIGINS = [
     origin.strip()
@@ -139,6 +141,9 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
+    if not ENABLE_MULTI_USER_AUTH:
+        return get_or_create_local_user(db)
+
     if not credentials:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -150,6 +155,8 @@ async def get_current_user(
 
 def require_role(allowed_roles: List[str]):
     async def role_checker(user: User = Depends(get_current_user)):
+        if not ENABLE_MULTI_USER_AUTH:
+            return user
         if user.role not in allowed_roles:
             raise HTTPException(status_code=403, detail="Insufficient role")
         return user
@@ -165,6 +172,40 @@ def get_or_create_default_council(db: Session) -> Council:
     db.commit()
     db.refresh(council)
     return council
+
+
+def get_or_create_local_user(db: Session) -> User:
+    """Create/reuse the single local user used when auth is disabled."""
+    council = get_or_create_default_council(db)
+    user = db.query(User).filter(User.email == LOCAL_USER_EMAIL).first()
+    if not user:
+        user = User(
+            email=LOCAL_USER_EMAIL,
+            hashed_password=hash_password(secrets.token_urlsafe(32)),
+            role="admin",
+            council_id=council.id,
+            is_active=True,
+            department="Local",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    changed = False
+    if user.council_id is None:
+        user.council_id = council.id
+        changed = True
+    if user.role != "admin":
+        user.role = "admin"
+        changed = True
+    if not user.is_active:
+        user.is_active = True
+        changed = True
+    if changed:
+        db.commit()
+        db.refresh(user)
+    return user
 
 
 def backfill_default_council(db: Session, council: Council) -> None:
@@ -219,6 +260,10 @@ def _safe_file_response(path: Optional[str], media_type: Optional[str] = None, f
 
 def _redaction_source_image_path(doc: Document) -> Optional[str]:
     """Return the rendered image used for coordinate-based redaction."""
+    first_page = sorted(doc.pages or [], key=lambda page: page.page_number)[0] if doc.pages else None
+    if first_page:
+        return _page_source_image_path(first_page)
+
     if doc.original_path:
         stem = Path(doc.original_path).stem
         display = Path(PROCESSED_DIR) / f"{stem}_display.png"
@@ -240,6 +285,80 @@ def _redaction_source_image_path(doc: Document) -> Optional[str]:
                 return str(candidate)
 
     return None
+
+
+def _page_source_image_path(page: DocumentPage) -> Optional[str]:
+    """Return the geometry-stable image used for page coordinate editing."""
+    for path in (page.display_image_path, page.original_image_path, page.ocr_image_path):
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _get_page_or_404(db: Session, doc: Document, page_number: int) -> DocumentPage:
+    page = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id, DocumentPage.page_number == page_number)
+        .first()
+    )
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    return page
+
+
+def _latest_page_ocr(db: Session, doc: Document, page: DocumentPage) -> Optional[OCRResult]:
+    return (
+        db.query(OCRResult)
+        .filter(OCRResult.document_id == doc.id, OCRResult.page_number == page.page_number)
+        .order_by(OCRResult.id.desc())
+        .first()
+    )
+
+
+def _ocr_response(ocr: Optional[OCRResult]) -> Optional[dict]:
+    if not ocr:
+        return None
+    return {
+        "id": ocr.id,
+        "page_id": ocr.page_id,
+        "page_number": ocr.page_number,
+        "extracted_text": ocr.extracted_text,
+        "redacted_text": ocr.redacted_text,
+        "translated_text": ocr.translated_text,
+        "clean_text": ocr.clean_text,
+        "transcription_data": ocr.transcription_data,
+        "ocr_confidence": ocr.ocr_confidence,
+        "words": ocr.words,
+    }
+
+
+def _page_response(db: Session, doc: Document, page: DocumentPage, can_view_original_value: bool = True) -> dict:
+    redactions = (
+        db.query(Redaction)
+        .filter(Redaction.document_id == doc.id, Redaction.page_number == page.page_number)
+        .order_by(Redaction.id.asc())
+        .all()
+    )
+    warnings = page.vision_warnings or []
+    return {
+        "id": page.id,
+        "document_id": page.document_id,
+        "page_number": page.page_number,
+        "width": page.width,
+        "height": page.height,
+        "ocr_confidence": page.ocr_confidence,
+        "vision_status": page.vision_status or "not_run",
+        "vision_text": page.vision_text,
+        "vision_items": page.vision_items or [],
+        "vision_warnings": warnings,
+        "redaction_count": len([red for red in redactions if red.status != "rejected"]),
+        "warning_count": len(warnings),
+        "has_original": bool(_page_source_image_path(page)),
+        "has_redacted": bool(page.redacted_image_path),
+        "has_mask": bool(page.mask_image_path),
+        "ocr": _ocr_response(_latest_page_ocr(db, doc, page)),
+        "redactions": [_redaction_response(red, can_view_original_value) for red in redactions],
+    }
 
 
 def _normalise_bbox_payload(raw_bbox: str, image_path: Optional[str] = None) -> dict:
@@ -306,16 +425,14 @@ def _redaction_bbox_points(bbox: dict) -> Optional[list[list[float]]]:
         return None
 
 
-def _active_redaction_rows(db: Session, doc: Document) -> list[Redaction]:
-    return (
-        db.query(Redaction)
-        .filter(
-            Redaction.document_id == doc.id,
-            Redaction.status != "rejected",
-        )
-        .order_by(Redaction.id.asc())
-        .all()
+def _active_redaction_rows(db: Session, doc: Document, page: Optional[DocumentPage] = None) -> list[Redaction]:
+    query = db.query(Redaction).filter(
+        Redaction.document_id == doc.id,
+        Redaction.status != "rejected",
     )
+    if page is not None:
+        query = query.filter(Redaction.page_number == page.page_number)
+    return query.order_by(Redaction.page_number.asc(), Redaction.id.asc()).all()
 
 
 def _draw_redactions_on_image(image, redactions: list[Redaction], overlay: bool = False):
@@ -349,16 +466,51 @@ def _draw_redactions_on_image(image, redactions: list[Redaction], overlay: bool 
     return base
 
 
+def _write_burned_page_image(db: Session, doc: Document, page: DocumentPage, overlay: bool = False) -> str:
+    from PIL import Image
+
+    source_image_path = _page_source_image_path(page)
+    if not source_image_path:
+        raise HTTPException(status_code=404, detail="No rendered page image is available")
+
+    active_redactions = _active_redaction_rows(db, doc, page)
+    with Image.open(source_image_path) as source:
+        image = _draw_redactions_on_image(source, active_redactions, overlay=overlay)
+
+    out_folder = Path(doc.output_folder_path or Path(PROCESSED_DIR) / "exports" / f"doc_{doc.id}") / f"page_{page.page_number:04d}"
+    out_folder.mkdir(parents=True, exist_ok=True)
+    out_path = out_folder / ("redaction_preview_active.png" if overlay else "redacted_active.png")
+    image.save(out_path, "PNG", optimize=True)
+    if overlay:
+        page.mask_image_path = str(out_path)
+        if page.page_number == 1:
+            doc.mask_path = str(out_path)
+    else:
+        page.redacted_image_path = str(out_path)
+        if page.page_number == 1:
+            doc.redacted_path = str(out_path)
+    db.commit()
+    return str(out_path)
+
+
 def _write_burned_redaction_image(db: Session, doc: Document, overlay: bool = False) -> str:
+    first_page = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id)
+        .order_by(DocumentPage.page_number.asc())
+        .first()
+    )
+    if first_page:
+        return _write_burned_page_image(db, doc, first_page, overlay=overlay)
+
     from PIL import Image
 
     source_image_path = _redaction_source_image_path(doc)
     if not source_image_path:
         raise HTTPException(status_code=404, detail="No rendered image is available")
 
-    active_redactions = _active_redaction_rows(db, doc)
     with Image.open(source_image_path) as source:
-        image = _draw_redactions_on_image(source, active_redactions, overlay=overlay)
+        image = _draw_redactions_on_image(source, _active_redaction_rows(db, doc), overlay=overlay)
 
     out_folder = Path(doc.output_folder_path or Path(PROCESSED_DIR) / "exports" / f"doc_{doc.id}")
     out_folder.mkdir(parents=True, exist_ok=True)
@@ -374,28 +526,46 @@ def _write_burned_redaction_image(db: Session, doc: Document, overlay: bool = Fa
 
 def _write_burned_redaction_pdf(db: Session, doc: Document) -> str:
     """
-    Produce a raster PDF with redactions burned into pixels.
+    Produce a raster PDF with redactions burned into pixels across all pages.
 
-    This intentionally does not preserve source PDF text layers, annotations, or
-    source metadata. It is a first-page export while the app's PDF pipeline is
-    first-page only.
+    This intentionally does not preserve source PDF text layers, annotations,
+    forms, attachments, embedded files, or source metadata.
     """
     from PIL import Image
 
-    source_image_path = _redaction_source_image_path(doc)
-    if not source_image_path:
-        raise HTTPException(status_code=404, detail="No rendered image is available for PDF export")
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id)
+        .order_by(DocumentPage.page_number.asc())
+        .all()
+    )
+    if not pages:
+        source_image_path = _redaction_source_image_path(doc)
+        if not source_image_path:
+            raise HTTPException(status_code=404, detail="No rendered image is available for PDF export")
+        pages = [DocumentPage(document_id=doc.id, page_number=1, display_image_path=source_image_path)]
 
-    with Image.open(source_image_path) as source:
-        image = _draw_redactions_on_image(source, _active_redaction_rows(db, doc), overlay=False)
+    images = []
+    for page in pages:
+        source_image_path = _page_source_image_path(page)
+        if not source_image_path:
+            raise HTTPException(status_code=404, detail=f"No rendered image is available for page {page.page_number}")
+        with Image.open(source_image_path) as source:
+            image = _draw_redactions_on_image(source, _active_redaction_rows(db, doc, page), overlay=False)
+            images.append(image.convert("RGB"))
 
     out_folder = Path(doc.output_folder_path or Path(PROCESSED_DIR) / "exports" / f"doc_{doc.id}")
     out_folder.mkdir(parents=True, exist_ok=True)
     out_path = out_folder / "redacted_document.pdf"
-    image.save(
+    if not images:
+        raise HTTPException(status_code=404, detail="No pages are available for PDF export")
+    first, rest = images[0], images[1:]
+    first.save(
         out_path,
         "PDF",
         resolution=200.0,
+        save_all=True,
+        append_images=rest,
         title="",
         author="",
         subject="",
@@ -406,9 +576,94 @@ def _write_burned_redaction_pdf(db: Session, doc: Document) -> str:
     return str(out_path)
 
 
+def _verify_burned_pdf_export(db: Session, doc: Document, pdf_path: str) -> dict:
+    """Verify the exported PDF is a safe raster-burn artifact."""
+    from PyPDF2 import PdfReader
+
+    checks: list[dict] = []
+
+    def add_check(name: str, passed: bool, detail: str = "") -> None:
+        checks.append({"name": name, "passed": bool(passed), "detail": detail})
+
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id)
+        .order_by(DocumentPage.page_number.asc())
+        .all()
+    )
+    expected_page_count = len(pages) or 1
+    active_redactions = _active_redaction_rows(db, doc)
+    page_numbers = {page.page_number for page in pages} or {1}
+
+    try:
+        reader = PdfReader(pdf_path)
+        add_check(
+            "page_count",
+            len(reader.pages) == expected_page_count,
+            f"expected {expected_page_count}, got {len(reader.pages)}",
+        )
+
+        extracted_text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+        add_check("no_extractable_text", extracted_text == "", "hidden text found" if extracted_text else "")
+
+        annotations = []
+        for index, page in enumerate(reader.pages, start=1):
+            if page.get("/Annots"):
+                annotations.append(index)
+        add_check("no_annotations", not annotations, f"annotations on pages {annotations}" if annotations else "")
+
+        root = reader.trailer.get("/Root", {})
+        acro_form = root.get("/AcroForm") if hasattr(root, "get") else None
+        add_check("no_forms", not acro_form, "AcroForm/XFA data found" if acro_form else "")
+
+        names = root.get("/Names") if hasattr(root, "get") else None
+        embedded_files = None
+        if names and hasattr(names, "get"):
+            embedded_files = names.get("/EmbeddedFiles")
+        add_check("no_embedded_files", not embedded_files, "embedded files found" if embedded_files else "")
+
+        metadata = reader.metadata or {}
+        allowed_metadata_keys = {"/Producer", "/Creator", "/CreationDate", "/ModDate"}
+        unsafe_metadata = []
+        for key, value in dict(metadata).items():
+            text_value = str(value).strip() if value is not None else ""
+            if not text_value:
+                continue
+            filename_markers = [marker for marker in (doc.filename, doc.source_filename) if marker]
+            contains_source_name = any(marker in text_value for marker in filename_markers)
+            if key in allowed_metadata_keys and not contains_source_name:
+                continue
+            if text_value not in {"Synthetiq Redact"}:
+                unsafe_metadata.append(key)
+        add_check("metadata_generic", not unsafe_metadata, f"non-generic metadata keys: {unsafe_metadata}" if unsafe_metadata else "")
+    except Exception as exc:
+        add_check("pdf_readable", False, str(exc))
+
+    missing_page_or_bbox = [
+        red.id for red in active_redactions
+        if (red.page_number or 1) not in page_numbers or not _redaction_bbox_points(red.bbox or {})
+    ]
+    add_check(
+        "active_redactions_have_page_boxes",
+        not missing_page_or_bbox,
+        f"redactions missing page/bbox: {missing_page_or_bbox}" if missing_page_or_bbox else "",
+    )
+
+    passed = all(check["passed"] for check in checks)
+    return {
+        "passed": passed,
+        "pdf_path": pdf_path,
+        "page_count": expected_page_count,
+        "active_redactions": len(active_redactions),
+        "checks": checks,
+    }
+
+
 def _redaction_response(redaction: Redaction, can_view_original_value: bool = True) -> dict:
     return {
         "id": redaction.id,
+        "page_id": redaction.page_id,
+        "page_number": redaction.page_number or 1,
         "type": redaction.redaction_type,
         "redaction_type": redaction.redaction_type,
         "original_value": redaction.original_value if can_view_original_value else None,
@@ -419,6 +674,41 @@ def _redaction_response(redaction: Redaction, can_view_original_value: bool = Tr
         "method": redaction.method,
         "status": redaction.status or "pending",
     }
+
+
+def _record_redaction_review(
+    db: Session,
+    redaction: Redaction,
+    user: User,
+    *,
+    decision: str,
+    action_type: str,
+    previous_status: Optional[str] = None,
+    new_status: Optional[str] = None,
+    previous_bbox: Optional[dict] = None,
+    new_bbox: Optional[dict] = None,
+    previous_type: Optional[str] = None,
+    new_type: Optional[str] = None,
+    reason: str = "",
+) -> RedactionReview:
+    review = RedactionReview(
+        redaction_id=redaction.id,
+        document_id=redaction.document_id,
+        page_id=redaction.page_id,
+        page_number=redaction.page_number or 1,
+        reviewer_id=user.id,
+        decision=decision,
+        action_type=action_type,
+        previous_status=previous_status,
+        new_status=new_status,
+        previous_bbox=previous_bbox,
+        new_bbox=new_bbox,
+        previous_type=previous_type,
+        new_type=new_type,
+        reason=reason,
+    )
+    db.add(review)
+    return review
 
 
 def _safe_original_filename(filename: Optional[str]) -> str:
@@ -486,6 +776,8 @@ async def startup_event():
     try:
         council = get_or_create_default_council(db)
         backfill_default_council(db, council)
+        if not ENABLE_MULTI_USER_AUTH:
+            get_or_create_local_user(db)
     finally:
         db.close()
     print("[startup] Initialising Synthetiq Redact v2.0...")
@@ -977,24 +1269,25 @@ async def approve_redaction(
     ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
-    
+
+    old_status = red.status or "pending"
     red.status = "approved"
     red.reviewer_id = user.id
     red.reviewed_at = datetime.now(timezone.utc)
-    db.commit()
-    
-    # Log review
-    review = RedactionReview(
-        redaction_id=red.id,
-        document_id=red.document_id,
-        reviewer_id=user.id,
+
+    _record_redaction_review(
+        db,
+        red,
+        user,
         decision="approved",
+        action_type="approve",
+        previous_status=old_status,
+        new_status=red.status,
         previous_bbox=red.bbox,
         new_bbox=red.bbox,
         previous_type=red.redaction_type,
         new_type=red.redaction_type,
     )
-    db.add(review)
     db.commit()
     
     return {"message": "Redaction approved"}
@@ -1015,26 +1308,27 @@ async def reject_redaction(
     ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
-    
+
+    old_status = red.status or "pending"
     red.status = "rejected"
     red.reviewer_id = user.id
     red.reviewed_at = datetime.now(timezone.utc)
     red.review_reason = reason
-    db.commit()
-    
-    # Log review
-    review = RedactionReview(
-        redaction_id=red.id,
-        document_id=red.document_id,
-        reviewer_id=user.id,
+
+    _record_redaction_review(
+        db,
+        red,
+        user,
         decision="rejected",
+        action_type="remove",
+        previous_status=old_status,
+        new_status=red.status,
         previous_bbox=red.bbox,
         new_bbox=red.bbox,
         previous_type=red.redaction_type,
         new_type=red.redaction_type,
         reason=reason,
     )
-    db.add(review)
     db.commit()
     
     return {"message": "Redaction rejected"}
@@ -1042,8 +1336,10 @@ async def reject_redaction(
 
 @app.post("/api/documents/{doc_id}/redactions")
 @app.post("/api/document/{doc_id}/redactions")
+@app.post("/api/document/{doc_id}/pages/{page_number}/redactions")
 async def create_manual_redaction(
     doc_id: int,
+    page_number: int = 1,
     bbox: str = Form(...),
     redaction_type: str = Form("manual"),
     reason: str = Form("Manual redaction"),
@@ -1052,12 +1348,15 @@ async def create_manual_redaction(
 ):
     """Create a reviewer-drawn manual redaction box."""
     doc = _get_document_or_404(db, doc_id, user)
-    source_image_path = _redaction_source_image_path(doc)
+    page = _get_page_or_404(db, doc, page_number)
+    source_image_path = _page_source_image_path(page)
     normalised_bbox = _normalise_bbox_payload(bbox, source_image_path)
     clean_type = re.sub(r"[^a-z0-9_]+", "_", redaction_type.lower()).strip("_")[:40] or "manual"
 
     redaction = Redaction(
         document_id=doc.id,
+        page_id=page.id,
+        page_number=page.page_number,
         redaction_type=clean_type,
         original_value=None,
         masked_value=f"[REDACTED-{clean_type}]",
@@ -1076,20 +1375,23 @@ async def create_manual_redaction(
     db.commit()
     db.refresh(redaction)
 
-    review = RedactionReview(
-        redaction_id=redaction.id,
-        document_id=doc.id,
-        reviewer_id=user.id,
+    _record_redaction_review(
+        db,
+        redaction,
+        user,
         decision="created",
+        action_type="create",
+        previous_status=None,
+        new_status=redaction.status,
         previous_bbox=None,
         new_bbox=redaction.bbox,
         previous_type=None,
         new_type=redaction.redaction_type,
         reason=reason,
     )
-    db.add(review)
     log_action(db, doc.id, "manual_redaction_created", user_id=user.id, details={
         "redaction_id": redaction.id,
+        "page_number": page.page_number,
         "type": redaction.redaction_type,
     })
     db.commit()
@@ -1099,8 +1401,10 @@ async def create_manual_redaction(
 
 @app.post("/api/documents/{doc_id}/redactions/from-text")
 @app.post("/api/document/{doc_id}/redactions/from-text")
+@app.post("/api/document/{doc_id}/pages/{page_number}/redactions/from-text")
 async def create_text_redaction(
     doc_id: int,
+    page_number: int = 1,
     selected_text: str = Form(...),
     selection_start: Optional[int] = Form(None),
     selection_end: Optional[int] = Form(None),
@@ -1111,9 +1415,10 @@ async def create_text_redaction(
 ):
     """Create redaction boxes from selected OCR text."""
     doc = _get_document_or_404(db, doc_id, user)
+    page = _get_page_or_404(db, doc, page_number)
     ocr = (
         db.query(OCRResult)
-        .filter(OCRResult.document_id == doc.id)
+        .filter(OCRResult.document_id == doc.id, OCRResult.page_number == page.page_number)
         .order_by(OCRResult.id.desc())
         .first()
     )
@@ -1169,6 +1474,8 @@ async def create_text_redaction(
         for box in red.get("bboxes", []):
             redaction = Redaction(
                 document_id=doc.id,
+                page_id=page.id,
+                page_number=page.page_number,
                 redaction_type=clean_type,
                 original_value=value[:255],
                 masked_value=f"[REDACTED-{clean_type}]",
@@ -1189,19 +1496,23 @@ async def create_text_redaction(
     db.commit()
     for redaction in created:
         db.refresh(redaction)
-        db.add(RedactionReview(
-            redaction_id=redaction.id,
-            document_id=doc.id,
-            reviewer_id=user.id,
+        _record_redaction_review(
+            db,
+            redaction,
+            user,
             decision="created",
+            action_type="create",
+            previous_status=None,
+            new_status=redaction.status,
             previous_bbox=None,
             new_bbox=redaction.bbox,
             previous_type=None,
             new_type=redaction.redaction_type,
             reason=reason,
-        ))
+        )
     log_action(db, doc.id, "text_redaction_created", user_id=user.id, details={
         "count": len(created),
+        "page_number": page.page_number,
         "type": clean_type,
     })
     db.commit()
@@ -1226,34 +1537,41 @@ async def modify_redaction(
     ).first()
     if not red:
         raise HTTPException(status_code=404, detail="Redaction not found")
-    
+
+    doc = db.query(Document).filter(Document.id == red.document_id).first()
+    page = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == red.document_id, DocumentPage.page_number == (red.page_number or 1))
+        .first()
+    )
     old_bbox = red.bbox
     old_type = red.redaction_type
-    
-    red.bbox = json.loads(new_bbox)
+    old_status = red.status or "pending"
+
+    red.bbox = _normalise_bbox_payload(new_bbox, _page_source_image_path(page) if page else _redaction_source_image_path(doc))
     if new_type:
-        red.redaction_type = new_type
+        red.redaction_type = re.sub(r"[^a-z0-9_]+", "_", new_type.lower()).strip("_")[:40] or old_type
     red.status = "modified"
     red.reviewer_id = user.id
     red.reviewed_at = datetime.now(timezone.utc)
-    db.commit()
-    
-    # Log review
-    review = RedactionReview(
-        redaction_id=red.id,
-        document_id=red.document_id,
-        reviewer_id=user.id,
+
+    _record_redaction_review(
+        db,
+        red,
+        user,
         decision="modified",
+        action_type="modify",
+        previous_status=old_status,
+        new_status=red.status,
         previous_bbox=old_bbox,
         new_bbox=red.bbox,
         previous_type=old_type,
         new_type=red.redaction_type,
         reason=reason,
     )
-    db.add(review)
     db.commit()
     
-    return {"message": "Redaction modified"}
+    return {"message": "Redaction modified", "redaction": _redaction_response(red)}
 
 
 @app.post("/api/document/{doc_id}/approve-all")
@@ -1271,9 +1589,24 @@ async def approve_all_redactions(
     ).all()
     
     for red in reds:
+        old_status = red.status or "pending"
         red.status = "approved"
         red.reviewer_id = user.id
         red.reviewed_at = datetime.now(timezone.utc)
+        _record_redaction_review(
+            db,
+            red,
+            user,
+            decision="approved",
+            action_type="approve",
+            previous_status=old_status,
+            new_status=red.status,
+            previous_bbox=red.bbox,
+            new_bbox=red.bbox,
+            previous_type=red.redaction_type,
+            new_type=red.redaction_type,
+            reason="Approve all",
+        )
     
     if doc.status not in ("review_approved", "exported"):
         doc.status = "in_review"
@@ -1558,6 +1891,7 @@ async def get_document(
     doc = (
         db.query(Document)
         .options(
+            joinedload(Document.pages),
             joinedload(Document.ocr_results),
             joinedload(Document.redactions),
             joinedload(Document.audit_logs),
@@ -1574,17 +1908,8 @@ async def get_document(
     
     ocr_data = None
     if doc.ocr_results:
-        ocr = doc.ocr_results[0]
-        ocr_data = {
-            "id": ocr.id,
-            "extracted_text": ocr.extracted_text,
-            "redacted_text": ocr.redacted_text,
-            "translated_text": ocr.translated_text,
-            "clean_text": ocr.clean_text,
-            "transcription_data": ocr.transcription_data,
-            "ocr_confidence": ocr.ocr_confidence,
-            "words": ocr.words,
-        }
+        ocr = sorted(doc.ocr_results, key=lambda item: (item.page_number or 1, item.id))[0]
+        ocr_data = _ocr_response(ocr)
 
     redactions_data = []
     for r in doc.redactions:
@@ -1601,18 +1926,15 @@ async def get_document(
         elif mode == "full":
             masked_value = f"[REDACTED-{r.redaction_type}]"
         
-        redactions_data.append({
-            "id": r.id,
-            "type": r.redaction_type,
-            "redaction_type": r.redaction_type,
-            "original_value": r.original_value if can_view_original_value else None,
-            "masked_value": masked_value,
-            "visibility_mode": mode,
-            "bbox": r.bbox,
-            "confidence": r.confidence,
-            "method": r.method,
-            "status": r.status or "pending",
-        })
+        item = _redaction_response(r, can_view_original_value=can_view_original_value)
+        item["masked_value"] = masked_value
+        item["visibility_mode"] = mode
+        redactions_data.append(item)
+
+    pages_data = [
+        _page_response(db, doc, page, can_view_original_value=can_view_original_value)
+        for page in sorted(doc.pages or [], key=lambda item: item.page_number)
+    ]
 
     return {
         "id": doc.id,
@@ -1652,10 +1974,75 @@ async def get_document(
         "review_notes": doc.review_notes,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+        "page_count": len(pages_data) or 1,
+        "pages": pages_data,
         "ocr": ocr_data,
         "redactions": redactions_data,
         "batch_jobs": [{"id": b.id, "name": b.name} for b in doc.batch_jobs],
     }
+
+
+@app.get("/api/document/{doc_id}/pages")
+@app.get("/api/documents/{doc_id}/pages")
+async def get_document_pages(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Return page summaries for a document."""
+    doc = _get_document_or_404(db, doc_id, user)
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id)
+        .order_by(DocumentPage.page_number.asc())
+        .all()
+    )
+    can_view_original_value = user.role in {"admin", "reviewer", "dpo", "auditor"}
+    return {
+        "document_id": doc.id,
+        "page_count": len(pages),
+        "pages": [_page_response(db, doc, page, can_view_original_value) for page in pages],
+    }
+
+
+@app.get("/api/document/{doc_id}/pages/{page_number}")
+@app.get("/api/documents/{doc_id}/pages/{page_number}")
+async def get_document_page(
+    doc_id: int,
+    page_number: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Return one page with page-scoped OCR, redactions, and vision warnings."""
+    doc = _get_document_or_404(db, doc_id, user)
+    page = _get_page_or_404(db, doc, page_number)
+    can_view_original_value = user.role in {"admin", "reviewer", "dpo", "auditor"}
+    return _page_response(db, doc, page, can_view_original_value)
+
+
+@app.get("/api/document/{doc_id}/pages/{page_number}/image")
+@app.get("/api/documents/{doc_id}/pages/{page_number}/image")
+async def get_document_page_image(
+    doc_id: int,
+    page_number: int,
+    type: str = Query("original", enum=["original", "redacted", "mask"]),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Serve a page-specific original, redacted, or mask image."""
+    doc = _get_document_or_404(db, doc_id, user)
+    page = _get_page_or_404(db, doc, page_number)
+
+    if type == "original":
+        path = _page_source_image_path(page)
+    elif type == "redacted":
+        path = _write_burned_page_image(db, doc, page, overlay=False)
+    elif type == "mask":
+        path = _write_burned_page_image(db, doc, page, overlay=True)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid image type")
+
+    return _safe_file_response(path)
 
 
 @app.get("/api/documents/{doc_id}/image")
@@ -1694,6 +2081,13 @@ async def export_document(
     normalized_type = "text" if type == "txt" else type
     if normalized_type == "pdf":
         pdf_path = _write_burned_redaction_pdf(db, doc)
+        verification = _verify_burned_pdf_export(db, doc, pdf_path)
+        if not verification["passed"]:
+            failed = [check for check in verification["checks"] if not check["passed"]]
+            raise HTTPException(status_code=409, detail={
+                "message": "Burned PDF verification failed. Download blocked.",
+                "checks": failed,
+            })
         response = _safe_file_response(
             pdf_path,
             media_type="application/pdf",
@@ -1720,6 +2114,24 @@ async def export_document(
     db.commit()
     log_action(db, doc.id, "exported", user_id=user.id, details={"type": normalized_type})
     return response
+
+
+@app.post("/api/documents/{doc_id}/verify-export")
+@app.post("/api/document/{doc_id}/verify-export")
+async def verify_export(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Build and verify the safe burned PDF without downloading it."""
+    doc = _get_document_or_404(db, doc_id, user)
+    pdf_path = _write_burned_redaction_pdf(db, doc)
+    verification = _verify_burned_pdf_export(db, doc, pdf_path)
+    log_action(db, doc.id, "export_verified", user_id=user.id, details={
+        "passed": verification["passed"],
+        "checks": verification["checks"],
+    })
+    return verification
 
 
 @app.post("/api/documents/{doc_id}/approve-release")
@@ -1753,6 +2165,137 @@ async def review_document(
     db.commit()
     log_action(db, doc.id, "flagged_for_review", user_id=user.id)
     return {"message": "Document flagged for review", "status": "needs_review"}
+
+
+@app.get("/api/documents/{doc_id}/history")
+@app.get("/api/document/{doc_id}/history")
+async def get_document_history(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Return redaction edit history for a document."""
+    doc = _get_document_or_404(db, doc_id, user)
+    entries = (
+        db.query(RedactionReview)
+        .filter(RedactionReview.document_id == doc.id)
+        .order_by(RedactionReview.reviewed_at.desc(), RedactionReview.id.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        "document_id": doc.id,
+        "undo_enabled": doc.status not in ("review_approved", "exported"),
+        "entries": [
+            {
+                "id": entry.id,
+                "redaction_id": entry.redaction_id,
+                "page_id": entry.page_id,
+                "page_number": entry.page_number or 1,
+                "action_type": entry.action_type or entry.decision,
+                "decision": entry.decision,
+                "previous_status": entry.previous_status,
+                "new_status": entry.new_status,
+                "previous_bbox": entry.previous_bbox,
+                "new_bbox": entry.new_bbox,
+                "previous_type": entry.previous_type,
+                "new_type": entry.new_type,
+                "reason": entry.reason,
+                "reviewed_at": entry.reviewed_at.isoformat() if entry.reviewed_at else None,
+            }
+            for entry in entries
+        ],
+    }
+
+
+@app.post("/api/documents/{doc_id}/undo-last")
+@app.post("/api/document/{doc_id}/undo-last")
+async def undo_last_redaction_action(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["reviewer", "admin"]))
+):
+    """Undo the latest reversible redaction action on a document."""
+    doc = _get_document_or_404(db, doc_id, user)
+    if doc.status in ("review_approved", "exported"):
+        raise HTTPException(status_code=409, detail="Undo is disabled after final release approval or export")
+
+    undo_entries = (
+        db.query(RedactionReview)
+        .filter(RedactionReview.document_id == doc.id, RedactionReview.action_type == "undo")
+        .all()
+    )
+    undone_review_ids = set()
+    for entry in undo_entries:
+        match = re.search(r"Undo review (\d+)", entry.reason or "")
+        if match:
+            undone_review_ids.add(int(match.group(1)))
+
+    candidates = (
+        db.query(RedactionReview)
+        .filter(
+            RedactionReview.document_id == doc.id,
+            RedactionReview.action_type.in_(["create", "modify", "remove", "approve"]),
+        )
+        .order_by(RedactionReview.reviewed_at.desc(), RedactionReview.id.desc())
+        .all()
+    )
+    target_review = next((entry for entry in candidates if entry.id not in undone_review_ids), None)
+    if not target_review:
+        raise HTTPException(status_code=404, detail="No reversible redaction action found")
+
+    redaction = db.query(Redaction).filter(
+        Redaction.id == target_review.redaction_id,
+        Redaction.document_id == doc.id,
+    ).first()
+    if not redaction:
+        raise HTTPException(status_code=404, detail="Redaction no longer exists")
+
+    previous_status = redaction.status
+    previous_bbox = redaction.bbox
+    previous_type = redaction.redaction_type
+
+    if target_review.action_type == "create":
+        redaction.status = "rejected"
+    elif target_review.action_type == "modify":
+        if target_review.previous_bbox is not None:
+            redaction.bbox = target_review.previous_bbox
+        if target_review.previous_type:
+            redaction.redaction_type = target_review.previous_type
+        if target_review.previous_status:
+            redaction.status = target_review.previous_status
+    elif target_review.action_type in {"remove", "approve"}:
+        redaction.status = target_review.previous_status or "pending"
+    else:
+        raise HTTPException(status_code=400, detail="Action cannot be undone")
+
+    redaction.reviewer_id = user.id
+    redaction.reviewed_at = datetime.now(timezone.utc)
+    doc.status = "in_review"
+    doc.flag_needs_review = True
+    doc.reviewer_id = user.id
+
+    _record_redaction_review(
+        db,
+        redaction,
+        user,
+        decision="undo",
+        action_type="undo",
+        previous_status=previous_status,
+        new_status=redaction.status,
+        previous_bbox=previous_bbox,
+        new_bbox=redaction.bbox,
+        previous_type=previous_type,
+        new_type=redaction.redaction_type,
+        reason=f"Undo review {target_review.id}",
+    )
+    log_action(db, doc.id, "redaction_undo", user_id=user.id, details={
+        "undone_review_id": target_review.id,
+        "redaction_id": redaction.id,
+        "page_number": redaction.page_number or 1,
+    })
+    db.commit()
+    return {"message": "Undo applied", "redaction": _redaction_response(redaction)}
 
 
 @app.get("/api/documents")
@@ -1854,5 +2397,6 @@ async def health_check():
     return {
         "status": "healthy" if core_ok else "degraded",
         "version": "2.0.0",
+        "local_mode": not ENABLE_MULTI_USER_AUTH,
         "models": model_status,
     }
