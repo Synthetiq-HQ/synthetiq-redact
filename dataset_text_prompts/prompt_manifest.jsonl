@@ -1,0 +1,9 @@
+{"document_id":"DOC-001","document_type":"foi_request","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-002","document_type":"sar_request","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-003","document_type":"housing_repair_complaint","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-004","document_type":"parking_appeal","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-005","document_type":"social_care_visit_note","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-006","document_type":"safeguarding_style_note","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-007","document_type":"homelessness_prevention_note","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+{"document_id":"DOC-008","document_type":"council_tax_support_form","expected_images":10,"fake_only":true,"prompt_file":"dataset_text.md"}
+

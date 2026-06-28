@@ -10,6 +10,7 @@ import api, {
   getPageImageBlobUrl,
   modifyRedaction,
   rejectRedaction as rejectRedactionApi,
+  subscribeProgress,
   undoLastAction,
   verifyExport,
 } from '../api';
@@ -77,15 +78,65 @@ function rectsEqual(first, second) {
 }
 
 function confidenceLabel(confidence) {
-  if (confidence >= 0.9) return 'High';
-  if (confidence >= 0.7) return 'Medium';
+  if (confidence >= 0.8) return 'High';
+  if (confidence >= 0.55) return 'Medium';
   return 'Low';
+}
+
+function normaliseEngineStatus(status, engineUsed = '') {
+  if (status?.label) return status;
+  if (engineUsed.includes('synthetiq_redact_v3_glm_geometry')) {
+    return {
+      mode: 'main',
+      label: 'Synthetiq Redact v3',
+      detail: 'GLM OCR text with value-level geometry mapping',
+      engine_used: engineUsed,
+    };
+  }
+  if (engineUsed.includes('fallback')) {
+    return {
+      mode: 'fallback',
+      label: 'Fallback',
+      detail: 'OCR word-box fallback used',
+      engine_used: engineUsed,
+    };
+  }
+  return {
+    mode: 'pending',
+    label: 'Selecting engine',
+    detail: 'Processing path will appear once redaction starts',
+    engine_used: engineUsed,
+  };
+}
+
+function engineBadgeClass(mode) {
+  if (mode === 'main') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (mode === 'fallback') return 'border-red-200 bg-red-50 text-red-800';
+  if (mode === 'unknown') return 'border-amber-200 bg-amber-50 text-amber-800';
+  return 'border-slate-200 bg-slate-50 text-slate-600';
+}
+
+// Short preview of the actual redacted text for the list/legend.
+function redactionValuePreview(redaction, max = 30) {
+  const value = String(redaction?.original_value || '').trim();
+  if (!value || value === '[image model candidate]') return '';
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+// A detected (non-manual) box below this confidence is treated as "needs review":
+// shown amber/dashed so a reviewer knows to check it before approving.
+function isReviewNeeded(redaction) {
+  if (!redaction) return false;
+  if (redaction.status === 'approved' || redaction.status === 'rejected') return false;
+  if (redaction.method === 'manual' || redaction.method === 'text_selection') return false;
+  return typeof redaction.confidence === 'number' && redaction.confidence < 0.6;
 }
 
 function overlayStyle(redaction, isSelected) {
   const rejected = redaction.status === 'rejected';
   const approved = redaction.status === 'approved';
   const manual = redaction.method === 'manual' || redaction.method === 'text_selection';
+  const review = isReviewNeeded(redaction);
   return {
     backgroundColor: rejected
       ? 'rgba(220, 38, 38, 0.12)'
@@ -93,14 +144,18 @@ function overlayStyle(redaction, isSelected) {
         ? 'rgba(0, 0, 0, 0.76)'
         : manual
           ? 'rgba(15, 23, 42, 0.42)'
-          : 'rgba(180, 83, 9, 0.30)',
+          : review
+            ? 'rgba(217, 119, 6, 0.32)'
+            : 'rgba(180, 83, 9, 0.30)',
     border: isSelected
       ? '2px solid #2563eb'
       : rejected
         ? '2px dashed #dc2626'
         : manual
           ? '2px solid #0f172a'
-          : '2px solid #b45309',
+          : review
+            ? '2px dashed #d97706'
+            : '2px solid #b45309',
   };
 }
 
@@ -123,15 +178,40 @@ function getSelectionOffsets(container) {
 function buildHighlightRanges(text, redactions) {
   const ranges = [];
   const lower = text.toLowerCase();
+  const normalisedChars = [];
+  const normalisedToSource = [];
+  Array.from(text).forEach((char, index) => {
+    if (/[a-z0-9]/i.test(char)) {
+      normalisedChars.push(char.toLowerCase());
+      normalisedToSource.push(index);
+    }
+  });
+  const normalisedText = normalisedChars.join('');
+
   for (const redaction of redactions) {
     if (redaction.status === 'rejected') continue;
     const value = String(redaction.original_value || '').trim();
     if (value.length < 2) continue;
     const needle = value.toLowerCase();
+    let matched = false;
     let index = lower.indexOf(needle);
     while (index >= 0) {
       ranges.push({ start: index, end: index + value.length, redaction });
+      matched = true;
       index = lower.indexOf(needle, index + value.length);
+    }
+    if (matched) continue;
+
+    const normalisedNeedle = value.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalisedNeedle.length < 2) continue;
+    let normalisedIndex = normalisedText.indexOf(normalisedNeedle);
+    while (normalisedIndex >= 0) {
+      const sourceStart = normalisedToSource[normalisedIndex];
+      const sourceEnd = normalisedToSource[normalisedIndex + normalisedNeedle.length - 1] + 1;
+      if (Number.isFinite(sourceStart) && Number.isFinite(sourceEnd) && sourceEnd > sourceStart) {
+        ranges.push({ start: sourceStart, end: sourceEnd, redaction });
+      }
+      normalisedIndex = normalisedText.indexOf(normalisedNeedle, normalisedIndex + normalisedNeedle.length);
     }
   }
 
@@ -146,20 +226,50 @@ function buildHighlightRanges(text, redactions) {
     }, []);
 }
 
-function renderHighlightedText(text, ranges, onRedactionClick) {
+function renderPlainSelectableText(text, startOffset, selection, onSelectText) {
+  return text.split(/(\s+)/).map((part, index, parts) => {
+    const offset = parts.slice(0, index).join('').length + startOffset;
+    if (!part || /^\s+$/.test(part)) return part;
+    const tokenStart = offset;
+    const tokenEnd = offset + part.length;
+    const selected = selection?.start === tokenStart && selection?.end === tokenEnd;
+    return (
+      <button
+        key={`${tokenStart}-${tokenEnd}-${part}`}
+        type="button"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => onSelectText({ start: tokenStart, end: tokenEnd, text: part })}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          onSelectText({ start: tokenStart, end: tokenEnd, text: part });
+        }}
+        className={`rounded-sm px-0.5 text-left ${
+          selected
+            ? 'bg-blue-100 text-blue-950 outline outline-1 outline-blue-400'
+            : 'hover:bg-blue-50 hover:text-blue-950'
+        }`}
+      >
+        {part}
+      </button>
+    );
+  });
+}
+
+function renderHighlightedText(text, ranges, onRedactionClick, onSelectText, selection) {
   if (!text) return <span className="text-slate-400">No OCR text available.</span>;
-  if (!ranges.length) return text;
+  if (!ranges.length) return renderPlainSelectableText(text, 0, selection, onSelectText);
 
   const parts = [];
   let cursor = 0;
   ranges.forEach((range, index) => {
     if (range.start > cursor) {
-      parts.push(text.slice(cursor, range.start));
+      parts.push(...renderPlainSelectableText(text.slice(cursor, range.start), cursor, selection, onSelectText));
     }
     parts.push(
       <button
         key={`${range.start}-${range.end}-${index}`}
         type="button"
+        onMouseDown={(event) => event.preventDefault()}
         onClick={() => onRedactionClick(range.redaction)}
         className="rounded-sm bg-amber-200 px-0.5 text-left text-slate-950 outline outline-1 outline-amber-400"
       >
@@ -168,7 +278,9 @@ function renderHighlightedText(text, ranges, onRedactionClick) {
     );
     cursor = range.end;
   });
-  if (cursor < text.length) parts.push(text.slice(cursor));
+  if (cursor < text.length) {
+    parts.push(...renderPlainSelectableText(text.slice(cursor), cursor, selection, onSelectText));
+  }
   return parts;
 }
 
@@ -190,11 +302,22 @@ function DocumentCanvas({
   continueDraw,
   finishDraw,
   draftRect,
+  pendingCreates = [],
   pendingChange,
   startEdit,
   disabledOverlay,
+  liveRedactionPreview = false,
+  processingActive = false,
+  processingMessage = '',
 }) {
   const pendingEditId = pendingChange?.mode === 'edit' ? pendingChange.redactionId : null;
+  const previewRedactions = redactions
+    .filter((redaction) => redaction.status !== 'rejected')
+    .map((redaction) => {
+      const rect = pendingEditId === redaction.id ? pendingChange.rect : bboxToRect(redaction);
+      return rect ? { redaction, rect } : null;
+    })
+    .filter(Boolean);
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -216,9 +339,9 @@ function DocumentCanvas({
           <div
             ref={stageRef}
             onMouseDown={drawEnabled ? beginDraw : undefined}
-            onMouseMove={drawEnabled ? continueDraw : undefined}
-            onMouseUp={drawEnabled ? finishDraw : undefined}
-            onMouseLeave={drawEnabled ? finishDraw : undefined}
+            onMouseMove={continueDraw}
+            onMouseUp={finishDraw}
+            onMouseLeave={finishDraw}
             className={`relative inline-block select-none bg-white shadow-sm ring-1 ring-slate-400 ${
               drawEnabled ? 'cursor-crosshair' : 'cursor-default'
             }`}
@@ -240,18 +363,74 @@ function DocumentCanvas({
               className="block h-full w-full"
             />
 
-            {showOverlays && redactions
-              .filter((redaction) => redaction.status !== 'rejected')
-              .map((redaction) => {
-                const rect = pendingEditId === redaction.id ? pendingChange.rect : bboxToRect(redaction);
-                if (!rect) return null;
+            {processingActive && (
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-30 h-1 overflow-hidden bg-blue-100/70">
+                <div className="processing-scanline h-full w-1/3 rounded-full bg-blue-600/80" />
+              </div>
+            )}
+
+            {liveRedactionPreview && previewRedactions.map(({ redaction, rect }) => (
+              <div
+                key={`live-${redaction.id}`}
+                className="pointer-events-none absolute bg-black"
+                style={{
+                  left: rect.x * zoom,
+                  top: rect.y * zoom,
+                  width: Math.max(1, rect.width * zoom),
+                  height: Math.max(1, rect.height * zoom),
+                  zIndex: 4,
+                }}
+              />
+            ))}
+
+            {liveRedactionPreview && draftRect && (
+              <div
+                className="pointer-events-none absolute bg-black"
+                style={{
+                  left: draftRect.x * zoom,
+                  top: draftRect.y * zoom,
+                  width: Math.max(1, draftRect.width * zoom),
+                  height: Math.max(1, draftRect.height * zoom),
+                  zIndex: 4,
+                }}
+              />
+            )}
+
+            {liveRedactionPreview && pendingCreates.map((rect, index) => (
+              <div
+                key={`pending-live-${index}`}
+                className="pointer-events-none absolute bg-black"
+                style={{
+                  left: rect.x * zoom,
+                  top: rect.y * zoom,
+                  width: Math.max(1, rect.width * zoom),
+                  height: Math.max(1, rect.height * zoom),
+                  zIndex: 4,
+                }}
+              />
+            ))}
+
+            {liveRedactionPreview && pendingChange?.mode === 'create' && (
+              <div
+                className="pointer-events-none absolute bg-black"
+                style={{
+                  left: pendingChange.rect.x * zoom,
+                  top: pendingChange.rect.y * zoom,
+                  width: Math.max(1, pendingChange.rect.width * zoom),
+                  height: Math.max(1, pendingChange.rect.height * zoom),
+                  zIndex: 4,
+                }}
+              />
+            )}
+
+            {showOverlays && previewRedactions.map(({ redaction, rect }) => {
                 const selected = selectedRedaction?.id === redaction.id;
                 return (
                   <button
                     type="button"
                     key={redaction.id}
                     onMouseDown={(event) => {
-                      if (!drawEnabled || redaction.status === 'rejected') return;
+                      if (redaction.status === 'rejected') return;
                       event.stopPropagation();
                       event.preventDefault();
                       startEdit(event, redaction, 'move');
@@ -272,7 +451,7 @@ function DocumentCanvas({
                     }}
                     aria-label={`Select ${redaction.type || 'redaction'}`}
                   >
-                    {drawEnabled && selected && redaction.status !== 'rejected' && (
+                    {selected && redaction.status !== 'rejected' && (
                       <>
                         {['nw', 'ne', 'sw', 'se'].map((handle) => (
                           <span
@@ -293,6 +472,20 @@ function DocumentCanvas({
                 );
               })}
 
+            {showOverlays && pendingCreates.map((rect, index) => (
+              <div
+                key={`pending-create-${index}`}
+                className="pointer-events-none absolute border-2 border-blue-700 bg-blue-500/20"
+                style={{
+                  left: rect.x * zoom,
+                  top: rect.y * zoom,
+                  width: rect.width * zoom,
+                  height: rect.height * zoom,
+                  zIndex: 6,
+                }}
+              />
+            ))}
+
             {(draftRect || (drawEnabled && pendingChange?.mode === 'create' ? pendingChange.rect : null)) && drawEnabled && (
               <div
                 className="absolute border-2 border-blue-700 bg-blue-500/20"
@@ -306,8 +499,25 @@ function DocumentCanvas({
             )}
           </div>
         ) : (
-          <div className="rounded-md border border-slate-300 bg-white p-8 text-sm text-slate-600">
-            Preview image is not available.
+          <div className="relative overflow-hidden rounded-md border border-slate-300 bg-white p-8 text-sm text-slate-600">
+            {processingActive ? (
+              <>
+                <div className="mb-3 flex items-center gap-2 font-semibold text-blue-900">
+                  <span className="h-2.5 w-2.5 rounded-full bg-blue-600 animate-pulse" />
+                  Preparing page preview
+                </div>
+                <div className="space-y-2">
+                  <div className="h-3 w-2/3 rounded bg-slate-200 processing-shimmer" />
+                  <div className="h-3 w-1/2 rounded bg-slate-200 processing-shimmer" />
+                  <div className="h-3 w-3/4 rounded bg-slate-200 processing-shimmer" />
+                </div>
+                <div className="mt-4 text-xs text-slate-500">
+                  {processingMessage || 'Rendering the uploaded document into the review workspace.'}
+                </div>
+              </>
+            ) : (
+              'Preview image is not available.'
+            )}
           </div>
         )}
         {disabledOverlay && (
@@ -346,11 +556,13 @@ export default function ReviewStudio({ docId, setScreen }) {
   const [drawMode, setDrawMode] = useState(false);
   const [manualType, setManualType] = useState('manual');
   const [draftRect, setDraftRect] = useState(null);
+  const [pendingCreates, setPendingCreates] = useState([]);
   const [drawStart, setDrawStart] = useState(null);
   const [pendingChange, setPendingChange] = useState(null);
   const [editSession, setEditSession] = useState(null);
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState(null);
 
   const currentPage = useMemo(
     () => pages.find((page) => Number(page.page_number) === Number(currentPageNumber)) || pages[0] || null,
@@ -362,36 +574,39 @@ export default function ReviewStudio({ docId, setScreen }) {
     [redactions, currentPageNumber]
   );
 
-  const ocrText = currentPage?.ocr?.extracted_text || documentData?.ocr?.extracted_text || '';
+  // Prefer the clean transcription (GLM-OCR when enabled) over the raw OCR text,
+  // which is garbled on handwriting.
+  const ocrText = currentPage?.ocr?.clean_text
+    || currentPage?.ocr?.extracted_text
+    || documentData?.ocr?.clean_text
+    || documentData?.ocr?.extracted_text
+    || '';
   const activeRedactions = useMemo(
     () => pageRedactions.filter((redaction) => redaction.status !== 'rejected'),
     [pageRedactions]
   );
 
-  const reviewStats = useMemo(() => {
-    return pageRedactions.reduce(
-      (acc, redaction) => {
-        if (redaction.status === 'approved') acc.approved += 1;
-        else if (redaction.status === 'rejected') acc.rejected += 1;
-        else acc.pending += 1;
-        return acc;
-      },
-      { approved: 0, rejected: 0, pending: 0 }
-    );
-  }, [pageRedactions]);
+  const hasAnyWarnings = useMemo(
+    () => pages.some((page) => (page.warning_count || page.vision_warnings?.length || 0) > 0),
+    [pages]
+  );
 
   const highlightRanges = useMemo(
     () => buildHighlightRanges(ocrText, activeRedactions),
     [ocrText, activeRedactions]
   );
 
-  const selectedRect = (
-    pendingChange?.mode === 'edit' && pendingChange.redactionId === selectedRedaction?.id
-      ? pendingChange.rect
-      : bboxToRect(selectedRedaction)
-  );
   const selectedCanBeRemoved = Boolean(
     selectedRedaction && selectedRedaction.status !== 'rejected'
+  );
+  const activeProcessing = processingProgress && !['complete', 'needs_review', 'in_review', 'review_approved', 'exported'].includes(processingProgress.status);
+  const processingFailed = ['failed', 'error'].includes(processingProgress?.status || documentData?.status || '');
+  const engineStatus = useMemo(
+    () => normaliseEngineStatus(
+      processingProgress?.engine_status || documentData?.engine_status,
+      processingProgress?.engine_used || documentData?.engine_used || ''
+    ),
+    [documentData?.engine_status, documentData?.engine_used, processingProgress?.engine_status, processingProgress?.engine_used]
   );
 
   const loadDocument = useCallback(async () => {
@@ -426,6 +641,23 @@ export default function ReviewStudio({ docId, setScreen }) {
     loadDocument();
   }, [loadDocument]);
 
+  useEffect(() => {
+    const terminal = new Set(['complete', 'needs_review', 'in_review', 'review_approved', 'exported', 'failed', 'error']);
+    const status = documentData?.status;
+    if (!docId || !status || terminal.has(status)) {
+      setProcessingProgress(null);
+      return undefined;
+    }
+    const unsubscribe = subscribeProgress(docId, async (data) => {
+      setProcessingProgress(data);
+      if (terminal.has(data.status)) {
+        await loadDocument();
+        refreshRenderedImages();
+      }
+    });
+    return unsubscribe;
+  }, [docId, documentData?.status, loadDocument]);
+
   const loadHistory = useCallback(async () => {
     try {
       const result = await getDocumentHistory(docId);
@@ -443,13 +675,41 @@ export default function ReviewStudio({ docId, setScreen }) {
     setSelectedRedaction(null);
     setSelection(null);
     setDraftRect(null);
+    setPendingCreates([]);
     setDrawStart(null);
     setPendingChange(null);
     setEditSession(null);
     setImageSizes({});
   }, [currentPageNumber]);
 
-  const refreshCurrentPage = useCallback(async () => {
+  const capturePaneScroll = () => ({
+    original: {
+      left: originalScrollRef.current?.scrollLeft || 0,
+      top: originalScrollRef.current?.scrollTop || 0,
+    },
+    redacted: {
+      left: redactedScrollRef.current?.scrollLeft || 0,
+      top: redactedScrollRef.current?.scrollTop || 0,
+    },
+  });
+
+  const restorePaneScroll = (snapshot) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (originalScrollRef.current) {
+          originalScrollRef.current.scrollLeft = snapshot.original.left;
+          originalScrollRef.current.scrollTop = snapshot.original.top;
+        }
+        if (redactedScrollRef.current) {
+          redactedScrollRef.current.scrollLeft = snapshot.redacted.left;
+          redactedScrollRef.current.scrollTop = snapshot.redacted.top;
+        }
+      });
+    });
+  };
+
+  const refreshCurrentPage = useCallback(async ({ preserveScroll = true } = {}) => {
+    const scrollSnapshot = preserveScroll ? capturePaneScroll() : null;
     try {
       const page = await getDocumentPage(docId, currentPageNumber);
       setPages((prev) => prev.map((item) => (
@@ -467,21 +727,29 @@ export default function ReviewStudio({ docId, setScreen }) {
       await loadDocument();
     }
     await loadHistory();
+    if (scrollSnapshot) restorePaneScroll(scrollSnapshot);
   }, [currentPageNumber, docId, loadDocument, loadHistory]);
 
   useEffect(() => {
     let active = true;
     const objectUrls = [];
-    const modes = viewMode === 'both' ? ['original', 'redacted'] : [viewMode];
+    // The redacted pane is a live preview: original image + client-side black
+    // boxes. Keep the original image mounted so edits never require a PNG reload.
+    const modes = ['original'];
     setImageUrls({});
 
     async function loadImages() {
       const next = {};
       await Promise.all(modes.map(async (mode) => {
         try {
-          const url = currentPage?.page_number
-            ? await getPageImageBlobUrl(docId, currentPage.page_number, mode)
-            : await getImageBlobUrl(docId, mode);
+          let url;
+          try {
+            url = currentPage?.page_number
+              ? await getPageImageBlobUrl(docId, currentPage.page_number, mode)
+              : await getImageBlobUrl(docId, mode);
+          } catch (pageError) {
+            url = await getImageBlobUrl(docId, mode);
+          }
           objectUrls.push(url);
           next[mode] = url;
         } catch {
@@ -532,7 +800,6 @@ export default function ReviewStudio({ docId, setScreen }) {
       if (selected) setSelectedRedaction(selected);
       return next;
     });
-    refreshRenderedImages();
   };
 
   const clearPendingForRedaction = (redactionId) => {
@@ -559,7 +826,6 @@ export default function ReviewStudio({ docId, setScreen }) {
       )));
       if (selectedRedaction?.id === redactionId) setSelectedRedaction(null);
       clearPendingForRedaction(redactionId);
-      refreshRenderedImages();
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || 'Redaction could not be removed.');
@@ -594,7 +860,6 @@ export default function ReviewStudio({ docId, setScreen }) {
       setRedactions((prev) => prev.map((redaction) => (
         redaction.status === 'pending' ? { ...redaction, status: 'approved' } : redaction
       )));
-      refreshRenderedImages();
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || 'Redactions could not be approved.');
@@ -700,7 +965,6 @@ export default function ReviewStudio({ docId, setScreen }) {
         new_type: target.type || target.redaction_type || manualType,
         reason: 'Adjusted in review editor',
       });
-      refreshRenderedImages();
       await refreshCurrentPage();
     } catch (err) {
       setRedactions((prev) => prev.map((redaction) => (
@@ -766,11 +1030,11 @@ export default function ReviewStudio({ docId, setScreen }) {
 
     if (finalRect.width < 8 || finalRect.height < 8) return;
 
-    setPendingChange({ mode: 'create', rect: clampRectToImage(finalRect) });
+    setPendingCreates((prev) => [...prev, clampRectToImage(finalRect)]);
   };
 
   const startEdit = (event, redaction, handle) => {
-    if (!drawMode || saving || redaction.status === 'rejected') return;
+    if (saving || redaction.status === 'rejected') return;
     const point = pointFromEvent(event);
     const rect = bboxToRect(redaction);
     if (!point || !rect) return;
@@ -791,11 +1055,25 @@ export default function ReviewStudio({ docId, setScreen }) {
   };
 
   const applyBoxChange = async () => {
-    if (!drawMode || !pendingChange) return;
+    if (!drawMode || (!pendingChange && pendingCreates.length === 0)) return;
     setSaving(true);
     setError('');
     try {
-      if (pendingChange.mode === 'create') {
+      if (pendingCreates.length > 0) {
+        const createdRedactions = [];
+        for (const rect of pendingCreates) {
+          const created = await createManualRedaction(
+            docId,
+            rectToBbox(rect),
+            manualType,
+            'Drawn in review editor',
+            currentPageNumber
+          );
+          createdRedactions.push(created);
+        }
+        setRedactions((prev) => [...prev, ...createdRedactions]);
+        if (createdRedactions[0]) setSelectedRedaction(createdRedactions[0]);
+      } else if (pendingChange?.mode === 'create') {
         const created = await createManualRedaction(
           docId,
           rectToBbox(pendingChange.rect),
@@ -824,7 +1102,12 @@ export default function ReviewStudio({ docId, setScreen }) {
         setSelectedRedaction(updated);
       }
       setPendingChange(null);
-      refreshRenderedImages();
+      setPendingCreates([]);
+      // Box tool is one-shot: turn it off after applying so it doesn't stay armed.
+      setDrawMode(false);
+      setDraftRect(null);
+      setDrawStart(null);
+      setEditSession(null);
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Redaction change could not be saved.');
@@ -860,7 +1143,6 @@ export default function ReviewStudio({ docId, setScreen }) {
       if (created[0]) setSelectedRedaction(created[0]);
       setSelection(null);
       window.getSelection()?.removeAllRanges();
-      refreshRenderedImages();
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || 'Selected text could not be redacted.');
@@ -898,8 +1180,8 @@ export default function ReviewStudio({ docId, setScreen }) {
     try {
       await undoLastAction(docId);
       setPendingChange(null);
+      setPendingCreates([]);
       setSelectedRedaction(null);
-      refreshRenderedImages();
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || 'Nothing to undo.');
@@ -911,6 +1193,7 @@ export default function ReviewStudio({ docId, setScreen }) {
   const toggleDrawMode = () => {
     if (!drawMode && viewMode === 'redacted') setViewMode('original');
     setDraftRect(null);
+    setPendingCreates([]);
     setDrawStart(null);
     setEditSession(null);
     setDrawMode((active) => !active);
@@ -922,19 +1205,6 @@ export default function ReviewStudio({ docId, setScreen }) {
     const currentIndex = ordered.findIndex((page) => Number(page.page_number) === Number(currentPageNumber));
     const rotated = [...ordered.slice(currentIndex + 1), ...ordered.slice(0, currentIndex + 1)];
     const target = rotated.find((page) => (page.warning_count || page.vision_warnings?.length || 0) > 0);
-    if (target) setCurrentPageNumber(target.page_number);
-  };
-
-  const goToNextIssuePage = () => {
-    if (!pages.length) return;
-    const ordered = [...pages].sort((a, b) => Number(a.page_number) - Number(b.page_number));
-    const currentIndex = ordered.findIndex((page) => Number(page.page_number) === Number(currentPageNumber));
-    const rotated = [...ordered.slice(currentIndex + 1), ...ordered.slice(0, currentIndex + 1)];
-    const target = rotated.find((page) => (
-      (page.warning_count || page.vision_warnings?.length || 0) > 0 ||
-      (page.redaction_count || 0) > 0 ||
-      (page.ocr_confidence || 1) < 0.7
-    ));
     if (target) setCurrentPageNumber(target.page_number);
   };
 
@@ -957,31 +1227,38 @@ export default function ReviewStudio({ docId, setScreen }) {
       continueDraw={continueDraw}
       finishDraw={finishDraw}
       draftRect={draftRect}
+      pendingCreates={pendingCreates}
       pendingChange={pendingChange}
       startEdit={startEdit}
       disabledOverlay={false}
+      processingActive={Boolean(activeProcessing)}
+      processingMessage={processingProgress?.message}
     />
   );
 
   const redactedCanvas = (
     <DocumentCanvas
       title="Redacted"
-      imageUrl={imageUrls.redacted}
-      imageSize={imageSizes.redacted}
-      setImageSize={(size) => setImageSize('redacted', size)}
+      imageUrl={imageUrls.original}
+      imageSize={imageSizes.original}
+      setImageSize={(size) => setImageSize('original', size)}
       zoom={zoom}
-      redactions={[]}
+      redactions={pageRedactions}
       selectedRedaction={selectedRedaction}
       setSelectedRedaction={setSelectedRedaction}
       showOverlays={false}
+      liveRedactionPreview
       drawEnabled={false}
       stageRef={null}
       scrollRef={redactedScrollRef}
       onScroll={() => syncPaneScroll('redacted')}
-      draftRect={null}
-      pendingChange={null}
+      draftRect={draftRect}
+      pendingCreates={pendingCreates}
+      pendingChange={pendingChange}
       startEdit={() => {}}
       disabledOverlay={drawMode && viewMode === 'both'}
+      processingActive={Boolean(activeProcessing)}
+      processingMessage={processingProgress?.message}
     />
   );
 
@@ -1018,13 +1295,22 @@ export default function ReviewStudio({ docId, setScreen }) {
             <div className="truncate text-sm font-semibold text-slate-950">
               {documentData?.filename || 'Document'}
             </div>
-            <div className="text-xs text-slate-500">
+            <div className="mt-1">
+              <span
+                className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-bold ${engineBadgeClass(engineStatus.mode)}`}
+                title={engineStatus.detail}
+              >
+                {engineStatus.label}
+              </span>
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-slate-500">
               Page {currentPageNumber} of {pages.length || 1} · {activeRedactions.length} active on page · {documentData?.status || 'unknown'}
             </div>
           </div>
         </div>
 
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          {/* View */}
           <div className="flex rounded-md border border-slate-300 bg-slate-50 p-0.5">
             {VIEW_MODES.map((mode) => (
               <button
@@ -1043,70 +1329,6 @@ export default function ReviewStudio({ docId, setScreen }) {
             ))}
           </div>
 
-          <select
-            value={manualType}
-            onChange={(event) => setManualType(event.target.value)}
-            className="h-9 rounded-md border border-slate-300 bg-white px-2 text-xs font-semibold text-slate-700"
-            aria-label="Redaction type"
-          >
-            {MANUAL_TYPES.map((type) => (
-              <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>
-            ))}
-          </select>
-
-          <button
-            type="button"
-            onClick={toggleDrawMode}
-            className={`h-9 rounded-md px-3 text-xs font-bold ${
-              drawMode ? 'bg-slate-950 text-white' : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            Box tool
-          </button>
-
-          <button
-            type="button"
-            onClick={applyBoxChange}
-            disabled={!drawMode || !pendingChange || saving}
-            className="h-9 rounded-md bg-blue-700 px-3 text-xs font-bold text-white hover:bg-blue-600 disabled:bg-slate-200 disabled:text-slate-400"
-          >
-            Apply
-          </button>
-
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={!history.length || saving}
-            className="h-9 rounded-md border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:bg-slate-100 disabled:text-slate-300"
-          >
-            Undo
-          </button>
-
-          <button
-            type="button"
-            onClick={goToNextWarning}
-            className="h-9 rounded-md border border-amber-200 bg-white px-3 text-xs font-bold text-amber-800 hover:bg-amber-50"
-          >
-            Next warning
-          </button>
-
-          <button
-            type="button"
-            onClick={goToNextIssuePage}
-            className="h-9 rounded-md border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
-          >
-            Next issue
-          </button>
-
-          <button
-            type="button"
-            onClick={() => selectedRedaction && handleReject(selectedRedaction.id)}
-            disabled={!selectedCanBeRemoved || saving}
-            className="h-9 rounded-md border border-red-200 bg-white px-3 text-xs font-bold text-red-700 hover:bg-red-50 disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-white"
-          >
-            Remove selected
-          </button>
-
           <div className="flex items-center rounded-md border border-slate-300 bg-white">
             <button
               type="button"
@@ -1116,7 +1338,7 @@ export default function ReviewStudio({ docId, setScreen }) {
             >
               -
             </button>
-            <div className="w-14 text-center text-xs font-semibold text-slate-600">
+            <div className="w-12 text-center text-xs font-semibold text-slate-600">
               {Math.round(zoom * 100)}%
             </div>
             <button
@@ -1129,10 +1351,80 @@ export default function ReviewStudio({ docId, setScreen }) {
             </button>
           </div>
 
+          <div className="h-6 w-px bg-slate-200" aria-hidden="true" />
+
+          {/* Edit */}
+          <div className="flex items-center gap-1.5">
+            <select
+              value={manualType}
+              onChange={(event) => setManualType(event.target.value)}
+              className="h-9 rounded-md border border-slate-300 bg-white px-2 text-xs font-semibold text-slate-700"
+              aria-label="Redaction type for new boxes"
+              title="Type for new boxes you draw"
+            >
+              {MANUAL_TYPES.map((type) => (
+                <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={toggleDrawMode}
+              className={`h-9 rounded-md px-3 text-xs font-bold ${
+                drawMode ? 'bg-slate-950 text-white' : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              Box tool
+            </button>
+            <button
+              type="button"
+              onClick={applyBoxChange}
+              disabled={!drawMode || (!pendingChange && pendingCreates.length === 0) || saving}
+              className="h-9 rounded-md bg-blue-700 px-3 text-xs font-bold text-white hover:bg-blue-600 disabled:bg-slate-200 disabled:text-slate-400"
+            >
+              {pendingCreates.length > 1 ? `Apply ${pendingCreates.length}` : 'Apply'}
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedRedaction && handleReject(selectedRedaction.id)}
+              disabled={!selectedCanBeRemoved || saving}
+              className="h-9 rounded-md border border-red-200 bg-white px-3 text-xs font-bold text-red-700 hover:bg-red-50 disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-white"
+            >
+              Remove selected
+            </button>
+            <button
+              type="button"
+              onClick={handleUndo}
+              disabled={!history.length || saving}
+              className="h-9 rounded-md border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:bg-slate-100 disabled:text-slate-300"
+            >
+              Undo
+            </button>
+          </div>
+
+          <div className="h-6 w-px bg-slate-200" aria-hidden="true" />
+
+          {/* Navigate */}
+          {hasAnyWarnings && (
+          <div className="flex items-center gap-1.5">
+            {hasAnyWarnings && (
+              <button
+                type="button"
+                onClick={goToNextWarning}
+                className="h-9 rounded-md border border-amber-200 bg-white px-3 text-xs font-bold text-amber-800 hover:bg-amber-50"
+              >
+                Next warning
+              </button>
+            )}
+          </div>
+          )}
+
+          {hasAnyWarnings && <div className="h-6 w-px bg-slate-200" aria-hidden="true" />}
+
+          {/* Decide */}
           <button
             type="button"
             onClick={handleApproveAll}
-            className="h-9 rounded-md bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-600"
+            className="h-9 rounded-md border border-emerald-300 bg-white px-3 text-xs font-bold text-emerald-700 hover:bg-emerald-50"
           >
             Approve all
           </button>
@@ -1140,12 +1432,44 @@ export default function ReviewStudio({ docId, setScreen }) {
             type="button"
             onClick={handleDownloadPdf}
             disabled={downloading}
-            className="h-9 rounded-md bg-slate-950 px-3 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-60"
+            className="h-9 rounded-md bg-slate-950 px-4 text-xs font-bold text-white shadow-sm hover:bg-slate-800 disabled:opacity-60"
           >
-            {downloading ? 'Verifying' : 'Verify and download burned PDF'}
+            {downloading ? 'Verifying…' : 'Download redacted PDF'}
           </button>
         </div>
       </div>
+
+      {(activeProcessing || processingFailed) && (
+        <div className={`border-b px-4 py-3 ${
+          processingFailed ? 'border-red-200 bg-red-50' : 'border-blue-200 bg-blue-50'
+        }`}>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className={`font-bold ${processingFailed ? 'text-red-700' : 'text-blue-900'}`}>
+                {processingFailed ? 'Processing failed' : 'Processing document'}
+              </span>
+              <span className={`rounded-full border px-2 py-0.5 text-[11px] font-bold ${engineBadgeClass(engineStatus.mode)}`}>
+                {engineStatus.label}
+              </span>
+              <span className={processingFailed ? 'text-red-700' : 'text-blue-800'}>
+                {engineStatus.detail}
+              </span>
+            </div>
+            <span className={processingFailed ? 'text-red-700' : 'text-blue-800'}>
+              {processingProgress?.percent ?? 5}%
+            </span>
+          </div>
+          <div className={`h-2 overflow-hidden rounded-full ${processingFailed ? 'bg-red-100' : 'bg-blue-100'}`}>
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${processingFailed ? 'bg-red-500' : 'bg-blue-600 progress-striped'}`}
+              style={{ width: `${processingProgress?.percent ?? 5}%` }}
+            />
+          </div>
+          <div className={`mt-2 text-xs ${processingFailed ? 'text-red-700' : 'text-blue-800'}`}>
+            {processingProgress?.message || documentData?.needs_review_reason || 'Preparing the review workspace...'}
+          </div>
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside className="flex w-44 shrink-0 flex-col border-r border-slate-200 bg-white">
@@ -1189,9 +1513,10 @@ export default function ReviewStudio({ docId, setScreen }) {
               );
             })}
           </div>
+
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-200 p-4">
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-200 p-4">
           {error && (
             <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
@@ -1215,31 +1540,54 @@ export default function ReviewStudio({ docId, setScreen }) {
               originalCanvas
             )}
           </div>
-        </main>
 
-        <aside className="flex w-[420px] shrink-0 flex-col border-l border-slate-200 bg-white">
-          <div className="border-b border-slate-200 p-4">
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div className="rounded-md bg-emerald-50 px-2 py-2">
-                <div className="text-lg font-bold text-emerald-700">{reviewStats.approved}</div>
-                <div className="text-[11px] text-emerald-700">Approved</div>
+          <div className="pointer-events-none absolute bottom-5 right-5 z-10 rounded-md border border-slate-300 bg-white/90 px-3 py-2 text-[11px] shadow-sm backdrop-blur-sm">
+            <div className="mb-1 font-bold uppercase tracking-wide text-slate-400">Legend</div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-4 rounded-sm border-2 border-orange-700 bg-orange-700/30" />
+                <span className="text-slate-600">Proposed redaction</span>
               </div>
-              <div className="rounded-md bg-amber-50 px-2 py-2">
-                <div className="text-lg font-bold text-amber-700">{reviewStats.pending}</div>
-                <div className="text-[11px] text-amber-700">Pending</div>
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-4 rounded-sm border-2 border-dashed border-amber-500 bg-amber-500/30" />
+                <span className="text-slate-600">Needs review</span>
               </div>
-              <div className="rounded-md bg-red-50 px-2 py-2">
-                <div className="text-lg font-bold text-red-700">{reviewStats.rejected}</div>
-                <div className="text-[11px] text-red-700">Removed</div>
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-4 rounded-sm border-2 border-slate-900 bg-slate-900/40" />
+                <span className="text-slate-600">Manual / from text</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-4 rounded-sm bg-black" />
+                <span className="text-slate-600">Will be redacted</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="h-3 w-4 rounded-sm border-2 border-blue-600" />
+                <span className="text-slate-600">Selected</span>
               </div>
             </div>
           </div>
+        </main>
 
+        <aside className="flex w-[420px] shrink-0 flex-col border-l border-slate-200 bg-white">
           <div className="min-h-0 flex-1 overflow-auto">
+            <div className="border-b border-slate-200 p-4">
+              <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">Processing path</div>
+              <div className={`rounded-md border p-3 text-sm ${engineBadgeClass(engineStatus.mode)}`}>
+                <div className="font-bold">{engineStatus.label}</div>
+                <div className="mt-1 text-xs opacity-90">{engineStatus.detail}</div>
+                {(engineStatus.engine_used || engineStatus.handwriting_backend) && (
+                  <div className="mt-2 rounded bg-white/70 p-2 font-mono text-[11px] text-slate-700">
+                    {engineStatus.engine_used || 'engine pending'}
+                    {engineStatus.handwriting_backend ? ` / ${engineStatus.handwriting_backend}` : ''}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="border-b border-slate-200 p-4">
               <div className="mb-2 flex items-center justify-between">
                 <div className="text-xs font-bold uppercase tracking-wide text-slate-400">
-                  OCR text · page {currentPageNumber}
+                  Transcription · page {currentPageNumber}
                 </div>
                 <button
                   type="button"
@@ -1252,12 +1600,16 @@ export default function ReviewStudio({ docId, setScreen }) {
               </div>
               <div
                 ref={textRef}
-                onMouseUp={captureTextSelection}
-                onKeyUp={captureTextSelection}
                 tabIndex={0}
-                className="h-64 overflow-auto rounded-md border border-slate-300 bg-white p-3 font-mono text-xs leading-5 text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 whitespace-pre-wrap"
+                className="h-64 select-none overflow-auto rounded-md border border-slate-300 bg-white p-3 font-mono text-xs leading-5 text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 whitespace-pre-wrap"
               >
-                {renderHighlightedText(ocrText, highlightRanges, setSelectedRedaction)}
+                {renderHighlightedText(
+                  ocrText,
+                  highlightRanges,
+                  setSelectedRedaction,
+                  setSelection,
+                  selection
+                )}
               </div>
               <div className="mt-2 min-h-[34px] rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
                 {selection?.text ? (
@@ -1268,32 +1620,32 @@ export default function ReviewStudio({ docId, setScreen }) {
               </div>
             </div>
 
-            <div className="border-b border-slate-200 p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Vision warnings</div>
-                <span className="text-[11px] font-semibold text-slate-400">
-                  {currentPage?.vision_status || 'not run'}
-                </span>
-              </div>
-              <div className="max-h-36 space-y-2 overflow-auto">
-                {(currentPage?.vision_warnings || []).length ? (
-                  currentPage.vision_warnings.map((warning, index) => (
+            {(currentPage?.vision_warnings || []).length > 0 && (
+              <div className="border-b border-slate-200 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Vision warnings</div>
+                  <span className="text-[11px] font-semibold text-slate-400">
+                    {currentPage?.vision_status || 'not run'}
+                  </span>
+                </div>
+                <div className="max-h-36 space-y-2 overflow-auto">
+                  {currentPage.vision_warnings.map((warning, index) => (
                     <div key={`${warning}-${index}`} className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                       {warning}
                     </div>
-                  ))
-                ) : (
-                  <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                    No vision warnings for this page.
-                  </div>
-                )}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="border-b border-slate-200 p-4">
               <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">Redactions</div>
               <div className="max-h-56 space-y-1 overflow-auto pr-1">
-                {pageRedactions.length ? pageRedactions.map((redaction) => (
+                {pageRedactions.length ? [...pageRedactions]
+                  .sort((a, b) => (isReviewNeeded(b) ? 1 : 0) - (isReviewNeeded(a) ? 1 : 0) || (a.id || 0) - (b.id || 0))
+                  .map((redaction) => {
+                  const review = isReviewNeeded(redaction);
+                  return (
                   <div
                     key={redaction.id}
                     className={`rounded-md border p-2 text-xs ${
@@ -1301,28 +1653,45 @@ export default function ReviewStudio({ docId, setScreen }) {
                         ? 'border-blue-300 bg-blue-50'
                         : redaction.status === 'rejected'
                           ? 'border-slate-100 bg-slate-50 opacity-70'
-                          : 'border-transparent hover:bg-slate-50'
+                          : review
+                            ? 'border-amber-200 bg-amber-50/60 hover:bg-amber-50'
+                            : 'border-transparent hover:bg-slate-50'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <button
                         type="button"
                         onClick={() => setSelectedRedaction(redaction)}
-                        className="min-w-0 flex-1 text-left"
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                       >
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${review ? 'bg-amber-500' : 'bg-orange-700'}`} />
                         <span className="block truncate font-semibold text-slate-800">
                           {redaction.type?.replace(/_/g, ' ') || 'redaction'}
                         </span>
                       </button>
-                      <span className="text-[11px] text-slate-500">{redaction.status || 'pending'}</span>
+                      {review ? (
+                        <span className="shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">REVIEW</span>
+                      ) : (
+                        <span className="text-[11px] text-slate-500">{redaction.status || 'pending'}</span>
+                      )}
                     </div>
+                    {redactionValuePreview(redaction) && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedRedaction(redaction)}
+                        className="mt-1 block w-full truncate text-left font-mono text-[11px] text-slate-700"
+                        title={redaction.original_value || ''}
+                      >
+                        {redactionValuePreview(redaction)}
+                      </button>
+                    )}
                     <div className="mt-1 flex items-center justify-between gap-2">
                       <button
                         type="button"
                         onClick={() => setSelectedRedaction(redaction)}
                         className="min-w-0 flex-1 truncate text-left text-[11px] text-slate-500"
                       >
-                        {redaction.method || 'detected'} · {Math.round((redaction.confidence || 0) * 100)}%
+                        {confidenceLabel(redaction.confidence || 0)} · {Math.round((redaction.confidence || 0) * 100)}%
                       </button>
                       <button
                         type="button"
@@ -1334,7 +1703,8 @@ export default function ReviewStudio({ docId, setScreen }) {
                       </button>
                     </div>
                   </div>
-                )) : (
+                  );
+                }) : (
                   <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
                     No redactions yet.
                   </div>
@@ -1398,20 +1768,8 @@ export default function ReviewStudio({ docId, setScreen }) {
                     </div>
                   </div>
 
-                  {selectedRect && (
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Box</div>
-                      <div className="mt-1 grid grid-cols-4 gap-2 text-xs text-slate-700">
-                        <div className="rounded-md bg-slate-50 px-2 py-2">X {Math.round(selectedRect.x)}</div>
-                        <div className="rounded-md bg-slate-50 px-2 py-2">Y {Math.round(selectedRect.y)}</div>
-                        <div className="rounded-md bg-slate-50 px-2 py-2">W {Math.round(selectedRect.width)}</div>
-                        <div className="rounded-md bg-slate-50 px-2 py-2">H {Math.round(selectedRect.height)}</div>
-                      </div>
-                    </div>
-                  )}
-
                   <div>
-                    <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Value</div>
+                    <div className="text-xs font-bold uppercase tracking-wide text-slate-400">Redacted text</div>
                     <div className="mt-1 max-h-28 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-700">
                       {selectedRedaction.original_value || selectedRedaction.masked_value || '[redacted]'}
                     </div>

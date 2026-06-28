@@ -222,9 +222,9 @@ class RedactionLearner:
 # ---------------------------------------------------------------------------
 FIELD_LABEL_PATTERNS: Dict[str, re.Pattern] = {
     "person_name": re.compile(
-        r"(?<!\w)(?:Full\s+Name|Patient\s+Name|Child(?:'?s)?\s+Name|Applicant(?:\s+Name)?|"
+        r"(?<!\w)(?:Requester\s+Name|Full\s+Name|Patient\s+Name|Child(?:'?s)?\s+Name|Applicant(?:\s+Name)?|"
         r"Nombre|"
-        r"Reported\s+by|Emergency\s+Contact|Carer(?:\s+Name)?|Parent|Name)\b(?:\s*[:\-=]\s*|\s+)",
+        r"Reported\s+by|Emergency\s+Contact|Carer(?:\s+Name)?|Parent|Name)\b\s*[:\-=]\s*",
         re.IGNORECASE,
     ),
     "dob": re.compile(
@@ -242,7 +242,7 @@ FIELD_LABEL_PATTERNS: Dict[str, re.Pattern] = {
         re.IGNORECASE,
     ),
     "email": re.compile(
-        r"(?<!\w)Email(?:\s+Address)?\b(?:\s*[:\-=]\s*|\s+)",
+        r"(?<!\w)Email(?:\s+Address)?\b\s*[:\-=]\s*",
         re.IGNORECASE,
     ),
     "nin": re.compile(
@@ -268,7 +268,7 @@ FIELD_LABEL_PATTERNS: Dict[str, re.Pattern] = {
     ),
     "council_ref": re.compile(
         r"(?<!\w)(?:Council\s+Reference|Council\s+Ref|Case\s+Reference|Case\s+Ref|"
-        r"Counc\W+reference)\b(?:\s*[:\-=]\s*|\s+)",
+        r"Reference|Ref|Counc\W+reference)\b\s*[:\-=]\s*",
         re.IGNORECASE,
     ),
     "school": re.compile(
@@ -1061,6 +1061,157 @@ class RedactionEngine:
 
         return redactions
 
+    def map_label_lines_to_bboxes(
+        self,
+        ocr_words: List[Dict[str, Any]],
+        allowed_types: Optional[set] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build value boxes directly from labelled OCR lines.
+
+        This catches common handwritten/form fields even when the OCR text used
+        for span offsets drifts away from the OCR block text. It only fires on
+        label-looking lines such as "Email: value", never prose like
+        "send the response by email if possible".
+        """
+        if not ocr_words:
+            return []
+
+        redactions: List[Dict[str, Any]] = []
+        usable_words = [word for word in ocr_words if word.get("bbox") and str(word.get("text", "")).strip()]
+        if not usable_words:
+            return []
+
+        def _coords(word):
+            xs = [p[0] for p in word["bbox"]]
+            ys = [p[1] for p in word["bbox"]]
+            return min(xs), max(xs), min(ys), max(ys)
+
+        def _yc(word):
+            _, _, y0, y1 = _coords(word)
+            return (y0 + y1) / 2
+
+        avg_height = sum((_coords(word)[3] - _coords(word)[2]) for word in usable_words) / len(usable_words)
+        line_tol = max(avg_height * 0.75, 8)
+        groups: List[List[Dict[str, Any]]] = []
+        for word in sorted(usable_words, key=lambda item: (_yc(item), _coords(item)[0])):
+            for group in groups:
+                group_y = sum(_yc(item) for item in group) / len(group)
+                if abs(_yc(word) - group_y) <= line_tol:
+                    group.append(word)
+                    break
+            else:
+                groups.append([word])
+        for group in groups:
+            group.sort(key=lambda item: _coords(item)[0])
+
+        def _group_rect(group):
+            coords = [_coords(word) for word in group]
+            return (
+                min(c[0] for c in coords),
+                max(c[1] for c in coords),
+                min(c[2] for c in coords),
+                max(c[3] for c in coords),
+            )
+
+        def _line_text(group):
+            return " ".join(str(word.get("text", "")) for word in group)
+
+        def _line_conf(group):
+            return min(float(word.get("confidence", 0.85)) for word in group)
+
+        label_specs = [
+            (
+                "person_name",
+                re.compile(r"^\s*requester\s+(?:name|hame|nane)\b", re.I),
+                re.compile(r"^\s*requester\s+(?:name|hame|nane)\s*[:=\-\[]?\s*", re.I),
+            ),
+            (
+                "person_name",
+                re.compile(r"^\s*(?:full\s+)?(?:name|hame|nane)\b", re.I),
+                re.compile(r"^\s*(?:full\s+)?(?:name|hame|nane)\s*[:=\-\[]?\s*", re.I),
+            ),
+            (
+                "email",
+                re.compile(r"^\s*(?:e-?mail|emai|ernail)\b", re.I),
+                re.compile(r"^\s*(?:e-?mail|emai|ernail)(?:\s+address)?\s*[:=\-\[]?\s*", re.I),
+            ),
+            (
+                "phone",
+                re.compile(r"^\s*(?:phone|mobile|telephone|tel|contact\s+number)\b", re.I),
+                re.compile(r"^\s*(?:phone|mobile|telephone|tel|contact\s+number)\s*[:=\-\[]?\s*", re.I),
+            ),
+            (
+                "address",
+                re.compile(r"^\s*(?:postal\s+address|postal\s+adress|home\s+address|property\s+address|contact\s+address|address|adress)\b", re.I),
+                re.compile(r"^\s*(?:postal\s+address|postal\s+adress|home\s+address|property\s+address|contact\s+address|address|adress)\s*[:=\-\[]?\s*", re.I),
+            ),
+            (
+                "council_ref",
+                re.compile(r"^\s*(?:reference|ref|council\s+reference|council\s+ref|case\s+reference|case\s+ref)\b", re.I),
+                re.compile(r"^\s*(?:reference|ref|council\s+reference|council\s+ref|case\s+reference|case\s+ref)\s*[:=\-\[]?\s*", re.I),
+            ),
+        ]
+
+        for index, group in enumerate(groups):
+            text = _line_text(group).strip()
+            if not text:
+                continue
+            for rtype, detect_re, strip_re in label_specs:
+                if allowed_types and rtype not in allowed_types:
+                    continue
+                if not detect_re.search(text):
+                    continue
+                value = strip_re.sub("", text).strip(" \t:=-,;[]")
+                if len(value) < 2:
+                    continue
+                if rtype in {"phone", "council_ref"} and not any(ch.isdigit() for ch in value):
+                    continue
+
+                x0, x1, y0, y1 = _group_rect(group)
+                # The OCR often misses part of handwritten values. Use the end
+                # of the label token as the left edge and the visual line end as
+                # the right edge, so missed letters inside the value still get covered.
+                label_words = 2 if rtype in {"person_name", "address", "council_ref"} and len(group) > 2 else 1
+                label_right = max(_coords(word)[1] for word in group[:label_words])
+                value_x0 = min(x1, max(x0, label_right + 2))
+                if x1 <= value_x0 + 4:
+                    continue
+                bbox = [[value_x0, y0], [x1, y0], [x1, y1], [value_x0, y1]]
+                confidence = _line_conf(group)
+                redactions.append({
+                    "type": rtype,
+                    "bboxes": [{"bbox": bbox, "confidence": confidence}],
+                    "confidence": round(min(confidence, 0.92), 4),
+                    "method": "field_line",
+                    "value": value[:255],
+                })
+                break
+
+            if allowed_types and "person_name" not in allowed_types:
+                continue
+            if not re.search(r"^\s*signed\s*[,;:]?\s*$", text, re.I):
+                continue
+            # Add the line immediately after "Signed," as a signature/name box.
+            for following_group in groups[index + 1:index + 4]:
+                candidate = _line_text(following_group).strip()
+                if not candidate or any(ch.isdigit() for ch in candidate):
+                    continue
+                candidate_words = [part for part in re.split(r"\s+", candidate) if part]
+                if 1 <= len(candidate_words) <= 4:
+                    x0, x1, y0, y1 = _group_rect(following_group)
+                    confidence = _line_conf(following_group)
+                    redactions.append({
+                        "type": "person_name",
+                        "bboxes": [{"bbox": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "confidence": confidence}],
+                        "confidence": round(min(confidence, 0.86), 4),
+                        "method": "signed_name_line",
+                        "value": candidate[:255],
+                    })
+                    break
+
+        return redactions
+
     def _proportional_bbox(
         self,
         bbox: List[List[int]],
@@ -1454,8 +1605,18 @@ class RedactionEngine:
             "ref": "council_ref", "reference": "council_ref",
             "signature": "signature",
         }
+        LABEL_LINE_RE = re.compile(
+            r"^\s*(?:requester\s+name|full\s+name|name|e-?mail|email\s+address|"
+            r"phone|mobile|telephone|tel|contact\s+number|postal\s+address|"
+            r"home\s+address|property\s+address|address|postcode|dob|born|birth|"
+            r"nin|national\s+insurance|nhs|id|reference|ref|council\s+reference|"
+            r"case\s+reference|signature)\b\s*[:=\-]",
+            re.IGNORECASE,
+        )
         for block in ocr_blocks:
-            tokens = re.split(r"[\s:,=]+", block["text"].lower())
+            if not LABEL_LINE_RE.search(str(block.get("text", ""))):
+                continue
+            tokens = re.split(r"[\s:,=\-]+", block["text"].lower())
             triggered = next((LABEL_TRIGGERS[t] for t in tokens if t in LABEL_TRIGGERS), None)
             if not triggered:
                 continue

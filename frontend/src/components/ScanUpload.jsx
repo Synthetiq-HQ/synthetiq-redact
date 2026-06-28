@@ -1,8 +1,8 @@
 import { useState, useRef, useCallback } from 'react';
 import { uploadDocument } from '../api';
 
-const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.pdf', '.gif', '.bmp', '.tiff', '.tif'];
-const ACCEPTED_INPUT = 'image/png,image/jpeg,image/gif,image/bmp,image/tiff,application/pdf,.png,.jpg,.jpeg,.pdf,.gif,.bmp,.tiff,.tif';
+const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.pdf', '.docx', '.gif', '.bmp', '.tiff', '.tif'];
+const ACCEPTED_INPUT = 'image/png,image/jpeg,image/gif,image/bmp,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.png,.jpg,.jpeg,.pdf,.docx,.gif,.bmp,.tiff,.tif';
 
 export default function ScanUpload({ setScreen, setDocId, setDocData, setProgress }) {
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -31,7 +31,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
     const lowerName = nextFile.name.toLowerCase();
     const allowed = ACCEPTED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
     if (!allowed) {
-      setError('Upload a PNG, JPG, TIFF, GIF, BMP, or PDF file.');
+      setError('Upload a PNG, JPG, TIFF, GIF, BMP, PDF, or Word .docx file.');
       return;
     }
 
@@ -126,7 +126,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
       const result = await uploadDocument(file, translateEnabled, selectedCategory);
       if (result?.document_id) {
         setDocId(result.document_id);
-        setScreen('progress');
+        setScreen('review');
       } else {
         throw new Error('Invalid server response');
       }
@@ -141,7 +141,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
       {/* Header */}
       <div>
         <h2 className="text-xl font-semibold text-slate-900">New document</h2>
-        <p className="mt-1 text-sm text-slate-500">Upload a scanned image or PDF for local redaction review.</p>
+        <p className="mt-1 text-sm text-slate-500">Upload a scanned image, PDF, or Word document for local redaction review.</p>
       </div>
 
       {/* Camera view */}
@@ -169,10 +169,10 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
           ) : (
             <div className="flex min-h-48 flex-col items-center justify-center gap-2 bg-slate-50 p-6 text-center">
               <div className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                PDF
+                {file.name.toLowerCase().endsWith('.docx') ? 'DOCX' : 'PDF'}
               </div>
               <div className="max-w-full truncate text-sm font-semibold text-slate-800">{file.name}</div>
-              <div className="text-xs text-slate-500">PDF processing renders up to 50 pages and sends issues to human review.</div>
+              <div className="text-xs text-slate-500">Documents render into review pages and send issues to human review.</div>
             </div>
           )}
           <button onClick={resetSelectedFile}
@@ -196,7 +196,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
             }`}
           >
             <span className="text-base font-semibold text-slate-900">Drop a file here or click to choose</span>
-            <span className="mt-2 text-sm text-slate-500">PNG, JPG, TIFF, GIF, BMP, or PDF</span>
+            <span className="mt-2 text-sm text-slate-500">PNG, JPG, TIFF, GIF, BMP, PDF, or Word .docx</span>
             <span className="mt-4 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Choose file</span>
           </button>
           <input ref={fileInputRef} type="file" accept={ACCEPTED_INPUT} onChange={handleFileSelect} className="sr-only" />

@@ -1,0 +1,55 @@
+{
+  "document_id": "DOC-069",
+  "document_type": "blue_badge_application",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Blue Badge Application Review\nStoneford Council Mobility Team\nApplication reference: BBG-2026-4169\n\nApplicant name: Harper Test\nDate of birth: 19/10/1991\nNHS number: 469 783 5139\nAddress: 58 Dummy Hill, Stoneford ST7 8JH\nPhone: 07853 229 157\nEmail: harper.test.1069@example.invalid\n\nApplicant statement:\nI have difficulty walking from the car park to the clinic entrance and need to rest several times. My GP letter explains the mobility issue and current medication.\n\nDeclaration signed: Harper Test",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Harper Test",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "58 Dummy Hill, Stoneford ST7 8JH",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07853 229 157",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "BBG-2026-4169",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "harper.test.1069@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "dob",
+      "value": "19/10/1991",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "nhs_number",
+      "value": "469 783 5139",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "medical_details",
+      "value": "mentioned asthma symptoms after damp appeared in the bedroom",
+      "expected_action": "review"
+    },
+    {
+      "type": "signature",
+      "value": "Harper Test",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

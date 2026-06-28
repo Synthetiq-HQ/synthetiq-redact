@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import re
 import asyncio
 import shutil
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -31,6 +33,16 @@ from document_exports import (
 from redaction_profiles import get_profiles_for_category, get_allowed_types, requires_review
 from vision_verifier import compare_ocr_and_vision, run_vision_verification
 
+# Optional image-based redaction detector pass. Off by default; the pilot model is
+# review-assist only and must never replace OCR/text redaction.
+ENABLE_IMAGE_REDACTION_DETECTOR = os.environ.get("ENABLE_IMAGE_REDACTION_DETECTOR", "0") == "1"
+
+# Optional hybrid GLM-OCR + geometry mapping for precise value-level redaction.
+# Off by default: when on, sensitive values are detected on GLM-OCR's clean text
+# and mapped to EasyOCR word boxes by RedactionGeometryMapper. Falls back to the
+# existing OCR map_to_bboxes path if GLM-OCR is unavailable.
+USE_GLM_GEOMETRY_REDACTION = os.environ.get("USE_GLM_GEOMETRY_REDACTION", "0") == "1"
+
 
 def _pdf_page_count(path: str) -> Optional[int]:
     if os.path.splitext(path)[1].lower() != ".pdf":
@@ -47,8 +59,10 @@ def _public_error_message(exc: Exception) -> str:
     lower = message.lower()
     if "pdf" in lower:
         return "The PDF could not be rendered. Check that the file is valid and PDF rendering support is installed."
+    if "word" in lower or "docx" in lower:
+        return "The Word document could not be rendered. Upload a valid .docx file."
     if "cannot load image" in lower or "could not load image" in lower:
-        return "The file could not be converted into a readable image. Upload a valid PDF or supported image."
+        return "The file could not be converted into a readable image. Upload a valid PDF, DOCX, or supported image."
     return "Processing failed. Check the server logs for details."
 
 
@@ -63,6 +77,93 @@ def _keyword_estimate(text: str) -> str:
             best_count = count
             best_category = category
     return best_category
+
+
+def _valid_sensitive_span(span: dict) -> bool:
+    """Drop obvious false-positive spans before creating image boxes."""
+    stype = str(span.get("type") or "").lower()
+    value = str(span.get("value") or "")
+    compact = re.sub(r"\s+", "", value)
+    if stype == "email":
+        return "@" in value and "." in value.split("@")[-1]
+    if stype == "phone":
+        return len(re.sub(r"\D", "", value)) >= 10
+    if stype in {"postcode", "postal_code"}:
+        return bool(re.search(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", value, re.I))
+    if stype in {"reference", "case_reference", "council_ref"}:
+        return any(ch.isdigit() for ch in value) and ("-" in value or len(compact) >= 6)
+    return True
+
+
+def _bbox_rect(bbox: dict) -> Optional[tuple[float, float, float, float]]:
+    points = bbox.get("bbox") if isinstance(bbox, dict) else bbox
+    if not points:
+        return None
+    try:
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+    except (TypeError, ValueError, IndexError):
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _rect_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    intersection = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if intersection <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _rect_overlap_min_frac(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    intersection = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if intersection <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    smaller = min(area_a, area_b)
+    return intersection / smaller if smaller > 0 else 0.0
+
+
+def _dedupe_redaction_meta(redaction_meta: list[dict]) -> list[dict]:
+    """Drop near-identical boxes while preserving explicit field-line fixes."""
+    flattened: list[dict] = []
+    for red in redaction_meta:
+        for box in red.get("bboxes", []):
+            flattened.append({**red, "bboxes": [box]})
+
+    flattened.sort(
+        key=lambda item: (
+            0 if item.get("method") in {"field_line", "signed_name_line"} else 1,
+            -float(item.get("confidence", 0.0)),
+        )
+    )
+
+    kept: list[dict] = []
+    for item in flattened:
+        rect = _bbox_rect(item.get("bboxes", [{}])[0].get("bbox", {}))
+        if rect is None:
+            kept.append(item)
+            continue
+        duplicate = False
+        for existing in kept:
+            existing_rect = _bbox_rect(existing.get("bboxes", [{}])[0].get("bbox", {}))
+            same_type = item.get("type") == existing.get("type")
+            if existing_rect and (
+                _rect_iou(rect, existing_rect) >= 0.70
+                or (same_type and _rect_overlap_min_frac(rect, existing_rect) >= 0.70)
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(item)
+    return kept
 
 
 class DocumentPipeline:
@@ -83,11 +184,108 @@ class DocumentPipeline:
         self.sentiment = sentiment_engine
         self.llm = llm_engine
         self.handwriting = handwriting_engine or HandwritingTranscriptionEngine()
+        self._ocr_lock = threading.RLock()
 
     async def _set_status(self, db: Session, doc: Document, status: str, detail: str = "") -> None:
         doc.status = status
         db.commit()
         log_action(db, doc.id, f"status_change", details={"status": status, "detail": detail})
+
+    def _apply_image_detector(self, db: Session, doc: Document, page: DocumentPage, image_path: Optional[str]) -> int:
+        """
+        Optional review-assist pass: add pending image-detector candidate boxes.
+
+        Returns the number of pending candidate rows inserted. Failures are
+        swallowed (logged) so a flaky/missing detector never breaks processing.
+        """
+        if not image_path or not os.path.exists(image_path):
+            return 0
+        try:
+            from image_redaction_detector import get_detector, DetectorUnavailableError
+            detector = get_detector()
+            try:
+                predictions = detector.predict(image_path, page.page_number)
+            except DetectorUnavailableError as exc:
+                logger.info("Image detector unavailable, skipping pass: %s", exc)
+                return 0
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Image detector pass failed: %s", exc)
+            return 0
+
+        inserted = 0
+        for prediction in predictions:
+            db.add(Redaction(
+                document_id=doc.id,
+                page_id=page.id,
+                page_number=page.page_number,
+                redaction_type=prediction["redaction_type"],
+                original_value="[image model candidate]",
+                bbox=prediction["bbox"],
+                confidence=prediction["confidence"],
+                method=prediction["method"],
+                status="pending",
+            ))
+            inserted += 1
+        if inserted:
+            doc.flag_needs_review = True
+        return inserted
+
+    def _glm_geometry_meta(self, page, words, allowed_types, review_reasons, page_label, doc, ocr_record=None):
+        """
+        Hybrid precise redaction: GLM-OCR clean text -> sensitive spans -> mapped
+        onto EasyOCR word boxes by RedactionGeometryMapper.
+
+        Returns redaction_meta in the same shape as RedactionEngine.map_to_bboxes
+        (so the existing insertion + image-burning code is reused unchanged), or
+        None to signal the caller should fall back to the OCR mapping path.
+        """
+        if not words:
+            return None
+        try:
+            from glm_ocr_engine import get_glm_engine, GLMOCRUnavailable
+            from redaction_geometry_mapper import RedactionGeometryMapper
+
+            source_image = page.display_image_path or page.original_image_path or page.ocr_image_path
+            try:
+                glm_text = get_glm_engine().transcribe(source_image)
+            except GLMOCRUnavailable as exc:
+                logger.info("GLM-OCR unavailable, falling back to OCR mapping: %s", exc)
+                return None
+
+            # Surface GLM's clean transcription in the review UI (the raw OCR text
+            # stays in extracted_text for word-box mapping).
+            if ocr_record is not None:
+                ocr_record.clean_text = glm_text
+
+            spans = self.redaction.detect_sensitive_text(
+                glm_text, llm_engine=self.llm, allowed_types=allowed_types
+            )
+            spans = [span for span in spans if _valid_sensitive_span(span)]
+            mapped = RedactionGeometryMapper().map(
+                glm_text, spans, words, int(page.width or 0), int(page.height or 0)
+            )
+
+            meta = []
+            any_review = False
+            for r in mapped:
+                if r.get("needs_review"):
+                    any_review = True
+                if not r.get("bbox"):
+                    continue  # suppressed low-confidence box -> review flag only
+                meta.append({
+                    "type": r["type"],
+                    "value": r.get("original_value", ""),
+                    "confidence": r.get("confidence", 0.0),
+                    "method": r.get("method", "glm_geometry"),
+                    "bboxes": [{"bbox": r["bbox"]["bbox"], "confidence": r.get("confidence", 0.0)}],
+                })
+            if any_review:
+                doc.flag_needs_review = True
+                review_reasons.append(f"{page_label}: GLM geometry redaction flagged candidates for review")
+            return meta
+        except Exception as exc:  # pragma: no cover - defensive, never break processing
+            logger.warning("GLM geometry redaction failed, falling back to OCR mapping: %s", exc)
+            return None
 
     async def process(self, doc_id: int, db_session: Optional[Session] = None, translate_enabled: bool = True) -> None:
         """Main async processing pipeline with first-class multi-page support."""
@@ -156,11 +354,13 @@ class DocumentPipeline:
             handwriting_confidences: list[float] = []
             handwriting_backends: set[str] = set()
             handwriting_review_reasons: list[str] = []
+            redaction_engine_paths: set[str] = set()
 
             for page in pages:
                 page_label = f"Page {page.page_number}"
-                ocr_result = self.ocr.extract_text(page.ocr_image_path)
-                transcription = self.handwriting.transcribe(page.ocr_image_path, ocr_result)
+                with self._ocr_lock:
+                    ocr_result = self.ocr.extract_text(page.ocr_image_path)
+                    transcription = self.handwriting.transcribe(page.ocr_image_path, ocr_result)
                 transcription_data = transcription.to_dict()
                 text = ocr_result.get("full_text") or ""
                 words = ocr_result.get("words") or []
@@ -205,7 +405,28 @@ class DocumentPipeline:
                 sensitive_spans.extend(
                     _spans_from_transcription_fields(text, transcription.fields, allowed_types)
                 )
-                redaction_meta = self.redaction.map_to_bboxes(sensitive_spans, words)
+                await self._set_status(db, doc, "redaction", f"Finding sensitive data on {page_label}")
+                redaction_meta = None
+                if USE_GLM_GEOMETRY_REDACTION:
+                    redaction_meta = self._glm_geometry_meta(
+                        page, words, allowed_types, review_reasons, page_label, doc, ocr_record
+                    )
+                    if redaction_meta is not None:
+                        redaction_engine_paths.add("synthetiq_redact_v3_glm_geometry")
+                    else:
+                        redaction_engine_paths.add("fallback_easyocr_geometry_glm_unavailable")
+                        doc.flag_needs_review = True
+                        review_reasons.append(
+                            f"{page_label}: Synthetiq Redact v3 GLM geometry unavailable; fallback OCR geometry used"
+                        )
+                else:
+                    redaction_engine_paths.add("fallback_easyocr_geometry_config_off")
+                if redaction_meta is None:
+                    redaction_meta = self.redaction.map_to_bboxes(sensitive_spans, words)
+                redaction_meta.extend(
+                    self.redaction.map_label_lines_to_bboxes(words, allowed_types)
+                )
+                redaction_meta = _dedupe_redaction_meta(redaction_meta)
 
                 clean_spans = self.redaction.detect_sensitive_text(
                     clean_text,
@@ -230,6 +451,14 @@ class DocumentPipeline:
                             status="pending",
                         ))
                         total_redaction_boxes += 1
+
+                if ENABLE_IMAGE_REDACTION_DETECTOR:
+                    model_boxes = self._apply_image_detector(
+                        db, doc, page, page.display_image_path or page.original_image_path
+                    )
+                    if model_boxes:
+                        total_redaction_boxes += model_boxes
+                        review_reasons.append(f"{page_label}: image detector added review candidates")
 
                 page_out_folder = os.path.join(out_folder, f"page_{page.page_number:04d}")
                 os.makedirs(page_out_folder, exist_ok=True)
@@ -326,6 +555,7 @@ class DocumentPipeline:
                 if handwriting_confidences else None
             )
             doc.handwriting_review_reason = "; ".join(handwriting_review_reasons[:6]) or None
+            doc.engine_used = ",".join(sorted(redaction_engine_paths)) or None
 
             await self._set_status(db, doc, "translation", "Checking document language")
             await asyncio.sleep(0.1)

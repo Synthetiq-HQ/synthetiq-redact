@@ -1,6 +1,7 @@
 import os
 import logging
 import math
+import threading
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
@@ -249,6 +250,7 @@ class HandwritingOCREngine:
         self.processor = None
         self.model = None
         self._initialized = False
+        self._reader_lock = threading.RLock()
 
     def _init(self):
         if self._initialized:
@@ -274,7 +276,10 @@ class HandwritingOCREngine:
         img = Image.open(image_path).convert("RGB")
 
         # Step 1: EasyOCR detects text regions
-        detections = self.reader.readtext(image_path)
+        # EasyOCR readers are not reliably re-entrant on Windows. The backend can
+        # process multiple uploads at once, so keep reader access serialized.
+        with self._reader_lock:
+            detections = self.reader.readtext(image_path)
         if not detections:
             return OCRResult(
                 full_text="",
@@ -343,6 +348,7 @@ class OCREngineManager:
         self.easyocr_engine = None
         self.handwriting_engine = None
         self.layout_analyzer = LayoutAnalyzer()
+        self._easyocr_lock = threading.RLock()
         
         # Try to initialize PaddleOCR
         if PADDLE_AVAILABLE:
@@ -446,16 +452,42 @@ class OCREngineManager:
 
     def _extract_with_easyocr(self, image_path: str) -> Dict[str, Any]:
         """Extract text using EasyOCR."""
-        raw = self.easyocr_engine.readtext(image_path)
+        try:
+            with self._easyocr_lock:
+                raw = self.easyocr_engine.readtext(image_path)
+        except Exception as exc:
+            # A shared EasyOCR Reader can occasionally fail after concurrent use.
+            # Retry once with a fresh local reader so a single bad reader state
+            # does not fail the whole document.
+            logger.warning(f"[OCR Manager] EasyOCR shared reader failed, retrying fresh reader: {exc}")
+            if not EASYOCR_AVAILABLE:
+                raise
+            fresh_reader = easyocr.Reader(["en"], gpu=False)
+            with self._easyocr_lock:
+                raw = fresh_reader.readtext(image_path)
+            self.easyocr_engine = fresh_reader
+            if self.handwriting_engine:
+                self.handwriting_engine.reader = fresh_reader
         
         words = []
         texts = []
         confidences = []
         
         for item in raw:
-            bbox = item[0]
-            text = item[1]
-            conf = item[2]
+            if not item:
+                continue
+            if len(item) >= 3:
+                bbox = item[0]
+                text = item[1]
+                conf = item[2]
+            elif len(item) == 2:
+                bbox = item[0]
+                text = item[1]
+                conf = 0.5
+            else:
+                continue
+            if not text:
+                continue
             
             words.append({
                 "text": text,

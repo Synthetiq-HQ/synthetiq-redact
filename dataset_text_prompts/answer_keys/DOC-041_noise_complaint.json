@@ -1,0 +1,40 @@
+{
+  "document_id": "DOC-041",
+  "document_type": "noise_complaint",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Environmental Protection Noise Complaint\nLakeside Council\nComplaint reference: ENV-2026-4141\n\nComplainant: Rowan Example\nAddress affected: 5 Demo Terrace, Lakeside LS6 8BD\nPhone: 07717 881 473\nEmail: rowan.example.1041@example.invalid\n\nComplaint details:\nLoud music has been heard after midnight on four occasions this month. I have kept a diary and can provide recordings if required. Please do not disclose my name to the neighbour.\n\nSignature: Rowan Example",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Rowan Example",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "5 Demo Terrace, Lakeside LS6 8BD",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07717 881 473",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "ENV-2026-4141",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "rowan.example.1041@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "signature",
+      "value": "Rowan Example",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

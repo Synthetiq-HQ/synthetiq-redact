@@ -1,0 +1,67 @@
+# DOC-055 - School Transport Appeal
+
+## Copy-Paste ChatGPT Image Prompt
+
+Create 10 separate image generations.
+
+Important:
+- Do NOT create a collage, grid, contact sheet, storyboard, montage, split-screen, or one page containing multiple versions.
+- Each output must be a standalone image file.
+- Generate them as 10 separate image outputs, one image per output.
+- Each image should fill the whole canvas by itself.
+- Do not combine multiple images into one image.
+- Label your internal generation order only; do not put visible labels on the images.
+
+Generate output 1 of 10 now, then continue generating outputs 2-10 separately.
+
+Create exactly 10 separate image outputs for a synthetic OCR/redaction training dataset.
+
+DO NOT GIVE ONE OUTPUT. GIVE 10 SEPARATE OUTPUTS.
+
+IMPORTANT RULES:
+- Use ONLY the document text below as the content visible on the page.
+- Do not render these instructions.
+- Do not add real logos, QR codes, barcodes, watermarks, extra names, extra case details, or real personal data.
+- Keep the fake names, reference numbers, phone numbers, email, address, and signature readable.
+- The document should look like physical handwritten/scanned UK council paperwork, not a clean digital screenshot.
+- Generate one image per variation, for a total of 10 images.
+
+DOCUMENT TEXT TO RENDER:
+
+School Transport Appeal
+Fairford District Council Education Transport Team
+Appeal reference: STA-2026-4155
+
+Child: Avery Draft
+Child age: 14
+Parent / carer: Riley Trial
+School: Northbridge Academy
+Home address: 103 Sample Street, Fairford FF2 8PF
+Contact number: 07335 555 315
+
+Appeal reason:
+The walking route includes a crossing without a patrol and the child becomes anxious near heavy traffic. I am asking for the transport decision to be reviewed.
+
+Signed: Riley Trial
+
+VARIATIONS FOR THE 10 IMAGES:
+1. Neat blue-ink handwriting on plain A4, slight left tilt.
+2. Black ballpoint handwriting, mild scanner shadow.
+3. Typed headings with handwritten field values, slightly skewed scan.
+4. Messy but legible handwriting with uneven line spacing.
+5. Phone photo on a desk with soft shadow and small perspective angle.
+6. Faint pencil-like handwriting with low contrast but still readable.
+7. Older photocopy look with grey background and minor blur.
+8. Compact handwriting with narrow margins and slight page curl.
+9. Form-like layout with printed labels and handwritten values.
+10. Rushed handwriting with one crossed-out non-sensitive word, all PII still readable.
+
+Return the 10 generated images. Do not include any extra explanation unless needed.
+
+## Local Dataset Metadata
+
+- Document ID: DOC-055
+- Document type: school_transport_appeal
+- Expected image outputs: 10
+- Fake-only synthetic data: true
+- Matching answer key file: answer_key.json

@@ -1,0 +1,15 @@
+{
+  "manifest": "/workspace/synthetiq-redact/backend/training/exports/hybrid_redaction_pilot/hybrid_manifest.jsonl",
+  "rows_requested": 300,
+  "backends": {
+    "easyocr": {
+      "status": "complete",
+      "rows": 300,
+      "avg_cer": 0.3263,
+      "avg_wer": 0.5103,
+      "avg_seconds_per_row": 0.6735,
+      "errors": []
+    }
+  },
+  "predictions": "/workspace/synthetiq-redact/backend/training/reports/runpod_ocr_baseline_predictions.jsonl"
+}

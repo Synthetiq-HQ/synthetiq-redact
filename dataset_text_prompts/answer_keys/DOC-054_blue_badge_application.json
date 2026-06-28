@@ -1,0 +1,55 @@
+{
+  "document_id": "DOC-054",
+  "document_type": "blue_badge_application",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Blue Badge Application Review\nHilltown Borough Council Mobility Team\nApplication reference: BBG-2026-4154\n\nApplicant name: Hayden Fiction\nDate of birth: 01/07/1996\nNHS number: 454 878 4674\nAddress: 96 Example Road, Hilltown HT1 7OC\nPhone: 07298 514 262\nEmail: hayden.fiction.1054@example.invalid\n\nApplicant statement:\nI have difficulty walking from the car park to the clinic entrance and need to rest several times. My GP letter explains the mobility issue and current medication.\n\nDeclaration signed: Hayden Fiction",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Hayden Fiction",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "96 Example Road, Hilltown HT1 7OC",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07298 514 262",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "BBG-2026-4154",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "hayden.fiction.1054@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "dob",
+      "value": "01/07/1996",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "nhs_number",
+      "value": "454 878 4674",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "medical_details",
+      "value": "missed two medication doses this week and felt dizzy",
+      "expected_action": "review"
+    },
+    {
+      "type": "signature",
+      "value": "Hayden Fiction",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

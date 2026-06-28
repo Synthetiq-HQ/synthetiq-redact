@@ -1,0 +1,40 @@
+{
+  "document_id": "DOC-035",
+  "document_type": "social_care_visit_note",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Adult Social Care Visit Note\nAshbury Council\nCase ID: ASC-2026-4135\nVisit date: 19 June 2026\n\nResident: Casey Training\nNHS number: 435 745 4085\nDate of birth: 25/08/1973\nAddress: 106 Pilot Walk, Ashbury AB9 2PF\nEmergency contact: Parker Trial, 07495 635 155\n\nWorker note:\nResident said medical letters were lost during a temporary move. They asked for help reading letters from the benefits office. Kitchen floor was clear and no immediate trip hazards were seen during the visit.\n\nFollow-up requested: advice referral and welfare call.\nWorker initials: LT",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Casey Training",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "106 Pilot Walk, Ashbury AB9 2PF",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07495 635 155",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "ASC-2026-4135",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "nhs_number",
+      "value": "435 745 4085",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "medical_details",
+      "value": "said medical letters were lost during a temporary move",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

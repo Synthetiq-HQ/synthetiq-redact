@@ -1,0 +1,50 @@
+{
+  "document_id": "DOC-051",
+  "document_type": "safeguarding_style_note",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Children and Families Contact Note\nSynthetic safeguarding style training example\nCouncil reference: CF-2026-4151\n\nChild name: Kai Dataset\nChild age: 7\nParent / carer: Avery Fiction\nHome address: 75 Dummy Hill, Southgate SG7 4LN\nSchool: Brookvale Primary\nContact phone: 07187 391 103\n\nSummary of concern:\nSchool reported that the child missed school after a family housing emergency. Parent said the family had a housing repair issue and was waiting for an appointment. No immediate injury was reported.\n\nAction: call parent, check housing repair status, and offer early help referral.\nRecorded by: Worker AB",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Bailey Fabricated",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "75 Dummy Hill, Southgate SG7 4LN",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07187 391 103",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "CF-2026-4151",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "child_name",
+      "value": "Kai Dataset",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "person_name",
+      "value": "Avery Fiction",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "school",
+      "value": "Brookvale Primary",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "safeguarding_context",
+      "value": "missed school after a family housing emergency",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

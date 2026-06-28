@@ -126,6 +126,8 @@ export function subscribeProgress(docId, onData) {
         status,
         message: data.needs_review_reason || statusMessage[status] || 'Processing...',
         percent: statusPercent[status] ?? 0,
+        engine_used: data.engine_used || '',
+        engine_status: data.engine_status || null,
       };
       onData(payload);
       if (!terminalStatuses.has(status)) {
@@ -312,6 +314,16 @@ export async function createTextRedaction(docId, {
   const res = await api.post(`/document/${docId}/pages/${pageNumber}/redactions/from-text`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
+  return res.data;
+}
+
+export async function runModelRedactionDetection(docId) {
+  const res = await api.post(`/document/${docId}/redactions/model-detect`);
+  return res.data;
+}
+
+export async function runModelRedactionDetectionForPage(docId, pageNumber = 1) {
+  const res = await api.post(`/document/${docId}/pages/${pageNumber}/redactions/model-detect`);
   return res.data;
 }
 

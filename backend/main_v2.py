@@ -9,6 +9,8 @@ import re
 import shlex
 import secrets
 import subprocess
+import io
+import zipfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -37,6 +39,7 @@ from classification import ClassificationEngine
 from sentiment_urgency import SentimentUrgencyEngine
 from llm_engine import LLMEngine
 from handwriting_transcription import HandwritingTranscriptionEngine
+from image_redaction_detector import get_detector, DetectorUnavailableError
 
 APP_ENV = os.environ.get("APP_ENV", "development").lower()
 IS_PRODUCTION = APP_ENV == "production"
@@ -47,12 +50,13 @@ AUDIT_SECRET = os.environ.get("AUDIT_SECRET", DEFAULT_DEV_AUDIT_SECRET)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = int(os.environ.get("JWT_EXPIRATION_HOURS", "8"))
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
-ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".pdf", ".gif", ".bmp", ".tiff", ".tif"}
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".pdf", ".docx", ".gif", ".bmp", ".tiff", ".tif"}
 ALLOWED_MAGIC = {
     ".png": (b"\x89PNG\r\n\x1a\n",),
     ".jpg": (b"\xff\xd8\xff",),
     ".jpeg": (b"\xff\xd8\xff",),
     ".pdf": (b"%PDF",),
+    ".docx": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
     ".gif": (b"GIF87a", b"GIF89a"),
     ".bmp": (b"BM",),
     ".tiff": (b"II*\x00", b"MM\x00*"),
@@ -732,6 +736,14 @@ def _validate_upload_bytes(content: bytes, ext: str) -> None:
     allowed = ALLOWED_MAGIC.get(ext, ())
     if allowed and not any(content.startswith(prefix) for prefix in allowed):
         raise HTTPException(status_code=400, detail="File content does not match its extension")
+    if ext == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = set(archive.namelist())
+                if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                    raise HTTPException(status_code=400, detail="File content does not match its extension")
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=400, detail="File content does not match its extension") from exc
 
 
 def _scan_uploaded_file(path: str) -> None:
@@ -1012,10 +1024,31 @@ async def upload_document(
 
 
 async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> None:
-    """Background task wrapper for pipeline."""
+    """Background task wrapper for pipeline.
+
+    The OCR/redaction pipeline is CPU/GPU-heavy and mostly synchronous. Run it in
+    a worker thread so status polling and image requests stay responsive while a
+    document is processing.
+    """
+    webhook_payload = await asyncio.to_thread(
+        _run_pipeline_sync,
+        doc_id,
+        translate_enabled,
+        user_id,
+    )
+    if webhook_payload:
+        db = SessionLocal()
+        try:
+            await _emit_webhook(db, "doc.complete", webhook_payload)
+        finally:
+            db.close()
+
+
+def _run_pipeline_sync(doc_id: int, translate_enabled: bool, user_id: int) -> Optional[Dict[str, Any]]:
+    """Synchronous worker-thread body for document processing."""
     db = SessionLocal()
     try:
-        await app.state.pipeline.process(doc_id, db, translate_enabled=translate_enabled)
+        asyncio.run(app.state.pipeline.process(doc_id, db, translate_enabled=translate_enabled))
         
         # Log completion
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1025,7 +1058,7 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
                     "status": doc.status,
                     "category": doc.category,
                 })
-                return
+                return None
             log_action(db, doc.id, "processing_complete", user_id=user_id, details={
                 "status": doc.status,
                 "category": doc.category,
@@ -1033,12 +1066,13 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
             })
             
             # Emit webhook if configured
-            await _emit_webhook(db, "doc.complete", {
+            return {
                 "document_id": doc.id,
                 "status": doc.status,
                 "category": doc.category,
                 "flag_needs_review": doc.flag_needs_review,
-            })
+            }
+        return None
     except Exception as e:
         db.rollback()
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1047,6 +1081,7 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
             doc.needs_review_reason = str(e)[:1000]
             db.commit()
             log_action(db, doc.id, "error", user_id=user_id, details={"error": str(e)})
+        return None
     finally:
         db.close()
 
@@ -1422,10 +1457,12 @@ async def create_text_redaction(
         .order_by(OCRResult.id.desc())
         .first()
     )
-    if not ocr or not ocr.extracted_text or not ocr.words:
+    if not ocr or not ocr.words:
         raise HTTPException(status_code=400, detail="OCR text is not available for this document")
 
-    text = ocr.extracted_text
+    clean_text = ocr.clean_text or ""
+    raw_ocr_text = ocr.extracted_text or ""
+    text = clean_text or raw_ocr_text
     raw_value = selected_text.strip()
     if len(raw_value) < 2:
         raise HTTPException(status_code=400, detail="Select text before redacting")
@@ -1465,7 +1502,55 @@ async def create_text_redaction(
         "confidence": 1.0,
         "method": "text_selection",
     }
-    redaction_meta = app.state.redaction_engine.map_to_bboxes([span], ocr.words)
+    redaction_meta = []
+    if clean_text:
+        try:
+            from redaction_geometry_mapper import RedactionGeometryMapper
+            mapper = RedactionGeometryMapper()
+            mapped_selection = mapper.map_selected_text(
+                value,
+                ocr.words,
+                int(page.width or 0),
+                int(page.height or 0),
+                clean_type,
+            )
+            mapped = [mapped_selection] if mapped_selection else mapper.map(
+                clean_text,
+                [span],
+                ocr.words,
+                int(page.width or 0),
+                int(page.height or 0),
+            )
+            for item in mapped:
+                if not item or not item.get("bbox"):
+                    continue
+                redaction_meta.append({
+                    "type": clean_type,
+                    "value": value,
+                    "confidence": item.get("confidence", 1.0),
+                    "method": "text_selection",
+                    "bboxes": [{"bbox": item["bbox"]["bbox"], "confidence": item.get("confidence", 1.0)}],
+                })
+        except Exception:
+            redaction_meta = []
+
+    if not redaction_meta:
+        # Fallback for older records without clean text: map the selected value
+        # against the OCR word stream, never clean-text offsets against raw OCR.
+        flat_ocr = " ".join(str(word.get("text") or "") for word in (ocr.words or []))
+        collapsed = re.sub(r"\s+", " ", raw_value).strip()
+        found = flat_ocr.lower().find(collapsed.lower())
+        if found < 0:
+            raise HTTPException(status_code=400, detail="Selected text could not be mapped to document boxes")
+        span = {
+            "type": clean_type,
+            "start": found,
+            "end": found + len(collapsed),
+            "value": raw_value,
+            "confidence": 1.0,
+            "method": "text_selection",
+        }
+        redaction_meta = app.state.redaction_engine.map_to_bboxes([span], ocr.words)
     if not redaction_meta or not redaction_meta[0].get("bboxes"):
         raise HTTPException(status_code=400, detail="Selected text could not be mapped to document boxes")
 
@@ -1518,6 +1603,152 @@ async def create_text_redaction(
     db.commit()
 
     return {"redactions": [_redaction_response(redaction) for redaction in created]}
+
+
+def _bbox_to_aabb(bbox: dict) -> Optional[tuple[float, float, float, float]]:
+    """Return (x0, y0, x1, y1) axis-aligned bounds for a redaction bbox."""
+    points = _redaction_bbox_points(bbox or {})
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _rect_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """Intersection-over-union for two (x0, y0, x1, y1) rectangles."""
+    ix0 = max(a[0], b[0])
+    iy0 = max(a[1], b[1])
+    ix1 = min(a[2], b[2])
+    iy1 = min(a[3], b[3])
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    intersection = iw * ih
+    if intersection <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+# IoU at or above this against an existing non-rejected box means "already covered".
+MODEL_DETECT_DEDUP_IOU = 0.80
+MODEL_DETECT_REVIEW_REASON = "Image detector added review candidates"
+
+
+def _run_model_detection(
+    db: Session,
+    doc: Document,
+    pages: list[DocumentPage],
+    user: User,
+) -> dict:
+    """Run the image detector over the given pages and insert pending candidates."""
+    detector = get_detector()
+    created: list[Redaction] = []
+    skipped_duplicates = 0
+
+    for page in pages:
+        source_image_path = _page_source_image_path(page)
+        if not source_image_path:
+            continue
+        try:
+            predictions = detector.predict(source_image_path, page.page_number)
+        except DetectorUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+        existing_rects = [
+            rect
+            for red in _active_redaction_rows(db, doc, page)
+            if (rect := _bbox_to_aabb(red.bbox or {})) is not None
+        ]
+
+        for prediction in predictions:
+            pred_rect = _bbox_to_aabb(prediction["bbox"])
+            if pred_rect is None:
+                continue
+            if any(_rect_iou(pred_rect, rect) >= MODEL_DETECT_DEDUP_IOU for rect in existing_rects):
+                skipped_duplicates += 1
+                continue
+
+            redaction = Redaction(
+                document_id=doc.id,
+                page_id=page.id,
+                page_number=page.page_number,
+                redaction_type=prediction["redaction_type"],
+                original_value="[image model candidate]",
+                masked_value=f"[REDACTED-{prediction['redaction_type']}]",
+                bbox=prediction["bbox"],
+                confidence=prediction["confidence"],
+                method=prediction["method"],
+                status="pending",
+            )
+            db.add(redaction)
+            created.append(redaction)
+            # Treat the freshly added box as existing so later boxes dedup against it.
+            existing_rects.append(pred_rect)
+
+    if created:
+        doc.flag_needs_review = True
+        if doc.status not in ("review_approved", "exported"):
+            doc.status = "in_review"
+        existing_reason = doc.needs_review_reason or ""
+        if MODEL_DETECT_REVIEW_REASON not in existing_reason:
+            doc.needs_review_reason = (
+                f"{existing_reason}; {MODEL_DETECT_REVIEW_REASON}".strip("; ")
+                if existing_reason
+                else MODEL_DETECT_REVIEW_REASON
+            )
+
+    db.commit()
+    for redaction in created:
+        db.refresh(redaction)
+
+    log_action(db, doc.id, "model_redaction_detection", user_id=user.id, details={
+        "created_count": len(created),
+        "skipped_duplicate_count": skipped_duplicates,
+        "pages": [page.page_number for page in pages],
+    })
+
+    return {
+        "created_count": len(created),
+        "skipped_duplicate_count": skipped_duplicates,
+        "redactions": [_redaction_response(redaction) for redaction in created],
+    }
+
+
+@app.post("/api/documents/{doc_id}/pages/{page_number}/redactions/model-detect")
+@app.post("/api/document/{doc_id}/pages/{page_number}/redactions/model-detect")
+async def model_detect_page_redactions(
+    doc_id: int,
+    page_number: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["reviewer", "admin"]))
+):
+    """Run the image redaction detector on a single page (review-assist only)."""
+    doc = _get_document_or_404(db, doc_id, user)
+    page = _get_page_or_404(db, doc, page_number)
+    return _run_model_detection(db, doc, [page], user)
+
+
+@app.post("/api/documents/{doc_id}/redactions/model-detect")
+@app.post("/api/document/{doc_id}/redactions/model-detect")
+async def model_detect_document_redactions(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(["reviewer", "admin"]))
+):
+    """Run the image redaction detector across all pages (review-assist only)."""
+    doc = _get_document_or_404(db, doc_id, user)
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == doc.id)
+        .order_by(DocumentPage.page_number.asc())
+        .all()
+    )
+    if not pages:
+        raise HTTPException(status_code=404, detail="No rendered pages are available")
+    return _run_model_detection(db, doc, pages, user)
 
 
 @app.post("/api/redactions/{redaction_id}/modify")
@@ -1835,7 +2066,13 @@ async def progress_stream(
                     last_status = doc.status
                     percent = STATUS_PERCENT.get(doc.status, 0)
                     message = STATUS_MESSAGES.get(doc.status, "Processing...")
-                    payload = json.dumps({"status": doc.status, "message": message, "percent": percent})
+                    payload = json.dumps({
+                        "status": doc.status,
+                        "message": message,
+                        "percent": percent,
+                        "engine_used": doc.engine_used,
+                        "engine_status": _engine_status_payload(doc),
+                    })
                     yield f"data: {payload}\n\n"
                 if doc.status in ("complete", "error", "failed", "needs_review", "review_approved"):
                     break
@@ -1877,6 +2114,51 @@ STATUS_MESSAGES = {
     "error": "Processing failed",
     "failed": "Processing failed",
 }
+
+
+def _engine_status_payload(doc: Document) -> dict:
+    """Human-readable processing path for the review UI."""
+    engine_used = doc.engine_used or ""
+    handwriting_backend = doc.handwriting_backend or ""
+    if "synthetiq_redact_v3_glm_geometry" in engine_used:
+        return {
+            "mode": "main",
+            "label": "Synthetiq Redact v3",
+            "detail": "GLM OCR text with value-level geometry mapping",
+            "engine_used": engine_used,
+            "handwriting_backend": handwriting_backend,
+        }
+    if "fallback_easyocr_geometry_config_off" in engine_used:
+        return {
+            "mode": "fallback",
+            "label": "Fallback",
+            "detail": "Synthetiq Redact v3 is disabled; OCR word-box fallback used",
+            "engine_used": engine_used,
+            "handwriting_backend": handwriting_backend,
+        }
+    if "fallback_easyocr_geometry" in engine_used:
+        return {
+            "mode": "fallback",
+            "label": "Fallback",
+            "detail": "Synthetiq Redact v3/GLM was unavailable; OCR word-box fallback used",
+            "engine_used": engine_used,
+            "handwriting_backend": handwriting_backend,
+        }
+    if doc.status in {"uploaded", "preprocessing", "ocr", "redaction"}:
+        return {
+            "mode": "pending",
+            "label": "Selecting engine",
+            "detail": "Processing path will appear here once redaction starts",
+            "engine_used": engine_used,
+            "handwriting_backend": handwriting_backend,
+        }
+    return {
+        "mode": "unknown",
+        "label": "Unknown path",
+        "detail": "No processing path was recorded for this document",
+        "engine_used": engine_used,
+        "handwriting_backend": handwriting_backend,
+    }
 
 
 @app.get("/api/documents/{doc_id}")
@@ -1968,6 +2250,7 @@ async def get_document(
         "handwriting_confidence": doc.handwriting_confidence,
         "handwriting_review_reason": doc.handwriting_review_reason,
         "engine_used": doc.engine_used,
+        "engine_status": _engine_status_payload(doc),
         "layout_regions": doc.layout_regions,
         "reviewer_id": doc.reviewer_id,
         "reviewed_at": doc.reviewed_at.isoformat() if doc.reviewed_at else None,

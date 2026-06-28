@@ -1,0 +1,8 @@
+{
+  "documents": 75,
+  "expected_images_total": 750,
+  "documents_folder": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\dataset_text_prompts\\documents",
+  "answer_keys_folder": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\dataset_text_prompts\\answer_keys",
+  "index_json": "C:\\Users\\INTERPOL\\OneDrive\\Documents\\REDACT\\synthetiq-redact\\dataset_text_prompts\\document_index.json",
+  "fake_only": true
+}

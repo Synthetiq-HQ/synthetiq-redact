@@ -1,0 +1,263 @@
+{
+  "predictions": "/workspace/synthetiq-redact/backend/training/reports/runpod_ocr_baseline_predictions.jsonl",
+  "metrics": {
+    "cer": "character error rate, lower is better",
+    "wer": "word error rate, lower is better",
+    "field_level_recall": "share of expected answer-key field values found in OCR text",
+    "pii_recall": "share of expected PII values found in OCR text",
+    "critical_pii_false_negative_count": "critical PII values missing from OCR output",
+    "redaction_box_mapping_success": "expected PII boxes matched by OCR word boxes at IoU threshold",
+    "low_confidence_review_trigger_accuracy": "whether low confidence would send risky rows to review"
+  },
+  "targets": {
+    "first_fake_council_cer_goal": 0.12,
+    "critical_pii_recall_before_real_pilot": 0.99,
+    "handwriting_auto_release_during_pilot": false
+  },
+  "backends": {
+    "easyocr": {
+      "status": "complete",
+      "rows": 300,
+      "cer": 0.3263,
+      "wer": 0.5103,
+      "line_recognition_accuracy": 0.0,
+      "field_level_recall": 0.4265,
+      "pii_recall": 0.4265,
+      "critical_pii_false_negative_count": 1062,
+      "critical_pii_missed": [
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD"
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153"
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD"
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153"
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD"
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD"
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example"
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid"
+        }
+      ],
+      "redaction_box_mapping_success": 0.0,
+      "redaction_mapping_missed": [
+        {
+          "type": "person_name",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD",
+          "best_iou": 0.0
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153",
+          "best_iou": 0.0
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101",
+          "best_iou": 0.0
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid",
+          "best_iou": 0.0
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD",
+          "best_iou": 0.0
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153",
+          "best_iou": 0.0
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101",
+          "best_iou": 0.0
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid",
+          "best_iou": 0.0
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD",
+          "best_iou": 0.0
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153",
+          "best_iou": 0.0
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101",
+          "best_iou": 0.0
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid",
+          "best_iou": 0.0
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "address",
+          "value": "11 Sample Street, Eastmere EM2 3BD",
+          "best_iou": 0.0
+        },
+        {
+          "type": "phone",
+          "value": "07137 141 153",
+          "best_iou": 0.0
+        },
+        {
+          "type": "case_reference",
+          "value": "FOI-2026-4101",
+          "best_iou": 0.0
+        },
+        {
+          "type": "email",
+          "value": "morgan.example.1001@example.invalid",
+          "best_iou": 0.0
+        },
+        {
+          "type": "signature",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        },
+        {
+          "type": "person_name",
+          "value": "Morgan Example",
+          "best_iou": 0.0
+        }
+      ],
+      "low_confidence_review_trigger_accuracy": {
+        "rows": 300,
+        "accuracy": 0.023333333333333334
+      }
+    }
+  }
+}

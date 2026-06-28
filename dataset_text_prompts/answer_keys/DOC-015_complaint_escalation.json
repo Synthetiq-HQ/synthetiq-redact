@@ -1,0 +1,40 @@
+{
+  "document_id": "DOC-015",
+  "document_type": "complaint_escalation",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Corporate Complaint Escalation\nSouthgate Council\nComplaint reference: CMP-2026-4115\n\nComplainant: Reese Training\nAddress: 109 Dummy Hill, Southgate SG7 3PF\nTelephone: 07655 715 895\nEmail: reese.training.1015@example.invalid\n\nComplaint summary:\nI have contacted the council three times and have not received a clear update. Please escalate this complaint and send a written response explaining the next steps and timescale.\n\nSigned: Reese Training",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Reese Training",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "109 Dummy Hill, Southgate SG7 3PF",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07655 715 895",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "CMP-2026-4115",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "reese.training.1015@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "signature",
+      "value": "Reese Training",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

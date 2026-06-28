@@ -1,0 +1,88 @@
+# DOC-001 - Foi Request
+
+## Ground Truth Letter Text
+
+```text
+Eastmere District Council
+Information Governance Team
+Civic Offices, Eastmere
+
+Freedom of Information Request
+Reference: FOI-2026-4101
+Date received: 11 June 2026
+
+Requester name: Morgan Example
+Email: morgan.example.1001@example.invalid
+Phone: 07137 141 153
+Postal address: 11 Sample Street, Eastmere EM2 3BD
+
+Dear Information Governance Team,
+
+Please provide copies of policies, internal guidance, and meeting notes about parking enforcement grace periods and vulnerability markers between January 2025 and May 2026. I would also like any equality impact screening documents linked to this topic.
+
+Please send the response by email if possible.
+
+Signed,
+Morgan Example
+```
+
+## Answer Key JSON
+
+```json
+{
+  "document_id": "DOC-001",
+  "document_type": "foi_request",
+  "fake_only": true,
+  "expected_images": 10,
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Morgan Example",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "11 Sample Street, Eastmere EM2 3BD",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07137 141 153",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "FOI-2026-4101",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "morgan.example.1001@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "signature",
+      "value": "Morgan Example",
+      "expected_action": "review"
+    }
+  ]
+}
+```
+
+## Image Generation Prompt
+
+Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.
+
+Make the 10 outputs varied exactly like this:
+1. neat blue-ink handwriting on plain A4, slight left tilt.
+2. black ballpoint handwriting, mild scanner shadow.
+3. typed headings with handwritten field values, slightly skewed scan.
+4. messy but legible handwriting with uneven line spacing.
+5. phone photo on a desk with soft shadow and small perspective angle.
+6. faint pencil-like handwriting with low contrast but still readable.
+7. older photocopy look with grey background and minor blur.
+8. compact handwriting with narrow margins and slight page curl.
+9. form-like layout with printed labels and handwritten values.
+10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.
+
+Keep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable.

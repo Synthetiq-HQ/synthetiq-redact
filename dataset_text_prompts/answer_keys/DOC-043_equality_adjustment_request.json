@@ -1,0 +1,40 @@
+{
+  "document_id": "DOC-043",
+  "document_type": "equality_adjustment_request",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Reasonable Adjustment Request\nFairford District Council Customer Services\nReference: EQA-2026-4143\n\nResident: Elliot Practice\nAddress: 19 Practice Gardens, Fairford FF8 3DJ\nEmail: elliot.practice.1043@example.invalid\nPhone: 07791 963 579\n\nRequest:\nPlease send future appointment letters in large print and allow extra time for telephone calls. The resident said anxiety makes it difficult to respond quickly to formal letters.\n\nResident signature: Elliot Practice",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Elliot Practice",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "19 Practice Gardens, Fairford FF8 3DJ",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07791 963 579",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "EQA-2026-4143",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "elliot.practice.1043@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "signature",
+      "value": "Elliot Practice",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

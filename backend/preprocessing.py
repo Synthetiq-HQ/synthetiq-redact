@@ -1,5 +1,7 @@
 import logging
 import os
+import shutil
+import textwrap
 from pathlib import Path
 
 import cv2
@@ -13,6 +15,7 @@ MAX_DIMENSION = 2000  # Resize images larger than this before processing
 PDF_RENDER_DPI = int(os.environ.get("PDF_RENDER_DPI", "200"))
 PDF_RENDER_PAGE = int(os.environ.get("PDF_RENDER_PAGE", "1"))
 MAX_PDF_PAGES = int(os.environ.get("MAX_PDF_PAGES", "50"))
+DOCX_RENDER_DPI = int(os.environ.get("DOCX_RENDER_DPI", "180"))
 
 
 def _float_env(name: str, default: float) -> float:
@@ -44,6 +47,47 @@ def _is_pdf(path: str) -> bool:
     return os.path.splitext(path)[1].lower() == ".pdf"
 
 
+def _is_docx(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() == ".docx"
+
+
+def _find_poppler_path() -> str | None:
+    """Return a Poppler bin folder for pdf2image on Windows/local runtimes."""
+    candidates = []
+    env_path = os.environ.get("POPPLER_PATH") or os.environ.get("PDF2IMAGE_POPPLER_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+
+    for tool in ("pdfinfo", "pdftoppm"):
+        located = shutil.which(tool)
+        if located:
+            candidates.append(Path(located).parent)
+
+    home = Path.home()
+    candidates.extend([
+        home / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "native" / "poppler" / "Library" / "bin",
+        home / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "native" / "poppler" / "bin",
+        Path("C:/poppler/Library/bin"),
+        Path("C:/poppler/bin"),
+        Path("C:/Program Files/poppler/Library/bin"),
+        Path("C:/Program Files/poppler/bin"),
+    ])
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        pdfinfo = candidate / ("pdfinfo.exe" if os.name == "nt" else "pdfinfo")
+        pdftoppm = candidate / ("pdftoppm.exe" if os.name == "nt" else "pdftoppm")
+        if pdfinfo.exists() and pdftoppm.exists():
+            return str(candidate)
+    return None
+
+
+def _pdf2image_kwargs() -> dict:
+    poppler_path = _find_poppler_path()
+    return {"poppler_path": poppler_path} if poppler_path else {}
+
+
 def _render_pdf_page(pdf_path: str):
     """Render a bounded PDF page to an OpenCV image."""
     try:
@@ -59,6 +103,7 @@ def _render_pdf_page(pdf_path: str):
             last_page=PDF_RENDER_PAGE,
             fmt="png",
             thread_count=1,
+            **_pdf2image_kwargs(),
         )
     except Exception as exc:
         raise ValueError("PDF could not be rendered. Check that the file is valid and Poppler is installed.") from exc
@@ -99,6 +144,7 @@ def _render_pdf_pages(pdf_path: str):
             last_page=page_count,
             fmt="png",
             thread_count=1,
+            **_pdf2image_kwargs(),
         )
     except Exception as exc:
         raise ValueError("PDF could not be rendered. Check that the file is valid and Poppler is installed.") from exc
@@ -112,6 +158,9 @@ def _load_with_exif(image_path: str):
     """Load image and apply EXIF rotation so pixel orientation matches display orientation."""
     if _is_pdf(image_path):
         return _render_pdf_page(image_path)
+    if _is_docx(image_path):
+        pages = _render_docx_pages(image_path)
+        return pages[0] if pages else None
 
     try:
         from PIL import Image as PILImage, ImageOps
@@ -122,6 +171,132 @@ def _load_with_exif(image_path: str):
     except Exception:
         pass
     return cv2.imread(image_path)  # fallback: PNG/already-processed images have no EXIF
+
+
+def _iter_docx_blocks(document):
+    """Yield paragraphs and tables in document order."""
+    from docx.document import Document as DocxDocument
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    if not isinstance(document, DocxDocument):
+        return
+    body = document.element.body
+    for child in body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, document)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, document)
+
+
+def _extract_docx_lines(docx_path: str) -> list[str]:
+    """Extract readable DOCX text in rough document order for local rendering."""
+    try:
+        from docx import Document as DocxDocument
+    except ImportError as exc:
+        raise ValueError("Word document support requires python-docx.") from exc
+
+    try:
+        document = DocxDocument(docx_path)
+    except Exception as exc:
+        raise ValueError("The Word document could not be read. Upload a valid .docx file.") from exc
+
+    lines: list[str] = []
+    for block in _iter_docx_blocks(document):
+        if hasattr(block, "text"):
+            lines.append(block.text.strip())
+        elif hasattr(block, "rows"):
+            for row in block.rows:
+                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                lines.append("    ".join(cell for cell in cells if cell))
+            lines.append("")
+
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    if not any(line.strip() for line in lines):
+        raise ValueError("The Word document did not contain readable text.")
+    return lines
+
+
+def _load_docx_font(size: int):
+    from PIL import ImageFont
+
+    font_candidates = [
+        Path(os.environ.get("DOCX_RENDER_FONT", "")),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("C:/Windows/Fonts/calibri.ttf"),
+        Path("C:/Windows/Fonts/segoeui.ttf"),
+    ]
+    for candidate in font_candidates:
+        if candidate and candidate.exists():
+            try:
+                return ImageFont.truetype(str(candidate), size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _measure_text(draw, text: str, font) -> tuple[int, int]:
+    bbox = draw.textbbox((0, 0), text or " ", font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _render_docx_pages(docx_path: str) -> list[np.ndarray]:
+    """
+    Render a DOCX into simple page images when office conversion is unavailable.
+
+    This supports clean typed DOCX documents locally without requiring Microsoft
+    Word, LibreOffice, or a cloud conversion service. Complex Word layout is
+    flattened to readable text/tables so the existing OCR/redaction pipeline can
+    process it just like an image upload.
+    """
+    from PIL import Image, ImageDraw
+
+    lines = _extract_docx_lines(docx_path)
+    page_w = int(8.27 * DOCX_RENDER_DPI)  # A4 portrait
+    page_h = int(11.69 * DOCX_RENDER_DPI)
+    margin = int(0.75 * DOCX_RENDER_DPI)
+    font_size = max(18, int(DOCX_RENDER_DPI * 0.085))
+    font = _load_docx_font(font_size)
+    line_gap = max(8, int(font_size * 0.45))
+    para_gap = max(12, int(font_size * 0.75))
+
+    pages = []
+    image = Image.new("RGB", (page_w, page_h), "white")
+    draw = ImageDraw.Draw(image)
+    x = margin
+    y = margin
+    max_text_width = page_w - (2 * margin)
+    avg_char_width = max(1, _measure_text(draw, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", font)[0] / 52)
+    wrap_width = max(20, int(max_text_width / avg_char_width))
+
+    def flush_page():
+        pages.append(cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR))
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            y += para_gap
+            continue
+
+        wrapped = textwrap.wrap(line, width=wrap_width, break_long_words=False, break_on_hyphens=False) or [""]
+        for segment in wrapped:
+            _, text_h = _measure_text(draw, segment, font)
+            if y + text_h + margin > page_h:
+                flush_page()
+                image = Image.new("RGB", (page_w, page_h), "white")
+                draw = ImageDraw.Draw(image)
+                y = margin
+            draw.text((x, y), segment, fill=(15, 23, 42), font=font)
+            y += text_h + line_gap
+        y += max(4, int(line_gap * 0.5))
+
+    flush_page()
+    return pages
 
 
 def _resize_if_needed(image: np.ndarray) -> np.ndarray:
@@ -260,9 +435,11 @@ def _write_page_derivatives(image: np.ndarray, out_dir: str, page_number: int) -
 
 
 def render_document_pages(input_path: str, out_dir: str) -> list[dict]:
-    """Render an image/PDF upload into per-page images for processing and review."""
+    """Render an image/PDF/DOCX upload into per-page images for processing and review."""
     if _is_pdf(input_path):
         images = _render_pdf_pages(input_path)
+    elif _is_docx(input_path):
+        images = _render_docx_pages(input_path)
     else:
         image = _load_with_exif(input_path)
         if image is None:

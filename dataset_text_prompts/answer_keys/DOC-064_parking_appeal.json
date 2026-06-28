@@ -1,0 +1,45 @@
+{
+  "document_id": "DOC-064",
+  "document_type": "parking_appeal",
+  "fake_only": true,
+  "expected_images": 10,
+  "ground_truth_text": "Northfield Council\nParking Services\nPenalty Charge Notice Appeal\n\nPCN number: PCN-2026-4164\nVehicle registration: EJ74 OTE\nApplicant: Riley Imaginary\nAddress: 23 Trial Crescent, Northfield NF2 3EM\nMobile: 07668 924 792\nEmail: riley.imaginary.1064@example.invalid\n\nI am appealing this penalty because the pay and display machine was not working. I tried to pay by card and the machine displayed temporarily unavailable. I left a handwritten note in the windscreen and moved the vehicle when I returned.\n\nSigned: Riley Imaginary",
+  "sensitive_items": [
+    {
+      "type": "person_name",
+      "value": "Riley Imaginary",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "address",
+      "value": "23 Trial Crescent, Northfield NF2 3EM",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "phone",
+      "value": "07668 924 792",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "case_reference",
+      "value": "PCN-2026-4164",
+      "expected_action": "review_or_redact"
+    },
+    {
+      "type": "email",
+      "value": "riley.imaginary.1064@example.invalid",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "vehicle_reg",
+      "value": "EJ74 OTE",
+      "expected_action": "redact_value"
+    },
+    {
+      "type": "signature",
+      "value": "Riley Imaginary",
+      "expected_action": "review"
+    }
+  ],
+  "image_generation_prompt": "Generate 10 different realistic images of the synthetic UK council document above. Each image must show the same document text as a physical handwritten or scanned page, not a clean digital screenshot. Do not add real personal data, real logos, QR codes, barcodes, watermarks, extra names, or extra case details.\n\nMake the 10 outputs varied exactly like this:\n1. neat blue-ink handwriting on plain A4, slight left tilt.\n2. black ballpoint handwriting, mild scanner shadow.\n3. typed headings with handwritten field values, slightly skewed scan.\n4. messy but legible handwriting with uneven line spacing.\n5. phone photo on a desk with soft shadow and small perspective angle.\n6. faint pencil-like handwriting with low contrast but still readable.\n7. older photocopy look with grey background and minor blur.\n8. compact handwriting with narrow margins and slight page curl.\n9. form-like layout with printed labels and handwritten values.\n10. rushed handwriting with one crossed-out non-sensitive word, all PII readable.\n\nKeep the content legible enough for OCR training. Preserve line breaks where possible. The answer-key values must appear exactly as written in the document text. If a word is hard to render, keep the fake names, reference numbers, phone numbers, emails, dates, addresses, NHS numbers, NI numbers, vehicle registrations, and signatures readable."
+}

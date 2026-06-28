@@ -1,0 +1,67 @@
+# DOC-002 - Sar Request
+
+## Copy-Paste ChatGPT Image Prompt
+
+Create 10 separate image generations.
+
+Important:
+- Do NOT create a collage, grid, contact sheet, storyboard, montage, split-screen, or one page containing multiple versions.
+- Each output must be a standalone image file.
+- Generate them as 10 separate image outputs, one image per output.
+- Each image should fill the whole canvas by itself.
+- Do not combine multiple images into one image.
+- Label your internal generation order only; do not put visible labels on the images.
+
+Generate output 1 of 10 now, then continue generating outputs 2-10 separately.
+
+Create exactly 10 separate image outputs for a synthetic OCR/redaction training dataset.
+
+DO NOT GIVE ONE OUTPUT. GIVE 10 SEPARATE OUTPUTS.
+
+IMPORTANT RULES:
+- Use ONLY the document text below as the content visible on the page.
+- Do not render these instructions.
+- Do not add real logos, QR codes, barcodes, watermarks, extra names, extra case details, or real personal data.
+- Keep the fake names, reference numbers, phone numbers, email, address, and signature readable.
+- The document should look like physical handwritten/scanned UK council paperwork, not a clean digital screenshot.
+- Generate one image per variation, for a total of 10 images.
+
+DOCUMENT TEXT TO RENDER:
+
+Westhaven Council
+Data Protection Office
+Subject Access Request
+Case reference: SAR-2026-4102
+Date: 13 June 2026
+
+Full name: Taylor Mock
+Date of birth: 07/11/1962
+National Insurance number: QQ 12 24 36 C
+Email: taylor.mock.1002@example.invalid
+Current address: 18 Fiction Avenue, Westhaven WH3 4CG
+
+I am requesting copies of personal information held by the housing repairs team, complaints team, and customer contact centre. Please include call notes, contractor comments, appointment records, and internal emails mentioning my case.
+
+Signature: Taylor Mock
+
+VARIATIONS FOR THE 10 IMAGES:
+1. Neat blue-ink handwriting on plain A4, slight left tilt.
+2. Black ballpoint handwriting, mild scanner shadow.
+3. Typed headings with handwritten field values, slightly skewed scan.
+4. Messy but legible handwriting with uneven line spacing.
+5. Phone photo on a desk with soft shadow and small perspective angle.
+6. Faint pencil-like handwriting with low contrast but still readable.
+7. Older photocopy look with grey background and minor blur.
+8. Compact handwriting with narrow margins and slight page curl.
+9. Form-like layout with printed labels and handwritten values.
+10. Rushed handwriting with one crossed-out non-sensitive word, all PII still readable.
+
+Return the 10 generated images. Do not include any extra explanation unless needed.
+
+## Local Dataset Metadata
+
+- Document ID: DOC-002
+- Document type: sar_request
+- Expected image outputs: 10
+- Fake-only synthetic data: true
+- Matching answer key file: answer_key.json
