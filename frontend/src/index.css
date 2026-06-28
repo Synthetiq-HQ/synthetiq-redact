@@ -3,12 +3,38 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --sr-black: #0b0d0f;
+    --sr-black-2: #151719;
+    --sr-black-3: #222426;
+    --sr-red: #e30613;
+    --sr-red-hover: #c90010;
+    --sr-red-active: #a7000d;
+    --sr-red-soft: #fff1f2;
+    --sr-red-soft-2: #ffe4e6;
+    --sr-red-border: #fca5a5;
+    --sr-text: #111315;
+    --sr-muted: #646b73;
+    --sr-line: #e5e7eb;
+  }
+
   html {
     -webkit-tap-highlight-color: transparent;
   }
   body {
     min-height: 100dvh;
     overflow-x: hidden;
+  }
+  /* The app shell uses select-none to avoid the browser's selection popup on
+     chrome (titles, nav). Re-enable selection for real inputs and any element
+     that opts in with .select-text (e.g. the transcription panel). */
+  input,
+  textarea,
+  [contenteditable="true"],
+  .select-text,
+  .select-text * {
+    -webkit-user-select: text;
+    user-select: text;
   }
 }
 
@@ -89,6 +115,136 @@
   .confidence-low {
     @apply text-red-700 bg-red-50 px-0.5 rounded;
   }
+
+  .brand-home-button {
+    display: flex;
+    height: 70px;
+    width: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    border-bottom: 1px solid rgb(30 41 59);
+    color: white;
+    background: rgb(15 23 42);
+    transition: background-color 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .brand-home-button:hover,
+  .brand-home-button--active {
+    background: rgb(30 41 59);
+  }
+
+  .brand-home-button__mark {
+    display: grid;
+    height: 42px;
+    width: 42px;
+    place-items: center;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 10px 22px rgb(0 0 0 / 0.22);
+    animation: brand-home-pop 680ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .brand-home-button__mark img {
+    display: block;
+    height: 33px;
+    width: 33px;
+    object-fit: contain;
+    filter: none;
+    pointer-events: none;
+  }
+
+  .brand-home-button__version {
+    font-size: 8px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0;
+    color: rgb(16 185 129);
+  }
+
+  .brand-splash {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    background:
+      linear-gradient(180deg, rgb(255 255 255) 0%, rgb(248 250 252) 100%);
+    animation: brand-splash-exit 2700ms cubic-bezier(0.45, 0, 0.55, 1) forwards;
+  }
+
+  .brand-splash__stage {
+    display: flex;
+    max-width: min(86vw, 720px);
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    animation: brand-stage-settle 2100ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .brand-splash__stage--single {
+    max-width: min(88vw, 560px);
+    animation: brand-wordmark-rise 1200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .brand-splash__mark {
+    height: 112px;
+    width: 112px;
+    flex: 0 0 auto;
+    object-fit: contain;
+    filter: drop-shadow(0 16px 28px rgb(15 23 42 / 0.14));
+    animation: brand-mark-enter 1300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .brand-splash__copy {
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    animation: brand-copy-reveal 1450ms cubic-bezier(0.16, 1, 0.3, 1) 420ms forwards;
+  }
+
+  .brand-splash__copy--single {
+    max-width: min(88vw, 560px);
+    opacity: 1;
+    animation: none;
+  }
+
+  .brand-splash__wordmark {
+    display: block;
+    width: min(470px, 62vw);
+    max-width: none;
+    object-fit: contain;
+    transform-origin: left center;
+    animation: brand-wordmark-rise 1450ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both;
+  }
+
+  .brand-splash__wordmark--single {
+    width: min(520px, 76vw);
+    animation: none;
+  }
+
+  .brand-splash__loader {
+    position: relative;
+    margin-top: 18px;
+    height: 3px;
+    width: min(420px, 58vw);
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgb(226 232 240);
+    opacity: 0;
+    animation: brand-loader-appear 900ms ease-out 850ms forwards;
+  }
+
+  .brand-splash__loader span {
+    display: block;
+    height: 100%;
+    width: 44%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgb(185 28 28), rgb(239 68 68), rgb(15 23 42));
+    animation: brand-loader-run 1050ms cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  }
 }
 
 @layer utilities {
@@ -147,4 +303,262 @@
   100% {
     background-position: -120% 0;
   }
+}
+
+@keyframes brand-home-pop {
+  0% {
+    opacity: 0.72;
+    transform: translateY(2px) scale(0.88) rotate(-2deg);
+  }
+  58% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.08) rotate(1deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+}
+
+@keyframes brand-splash-exit {
+  0%,
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+@keyframes brand-stage-settle {
+  0% {
+    transform: translateX(86px) scale(1.06);
+  }
+  48% {
+    transform: translateX(0) scale(1);
+  }
+  100% {
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes brand-mark-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.82);
+  }
+  38% {
+    opacity: 1;
+    transform: translateY(0) scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes brand-copy-reveal {
+  0% {
+    max-width: 0;
+    opacity: 0;
+  }
+  100% {
+    max-width: 540px;
+    opacity: 1;
+  }
+}
+
+@keyframes brand-wordmark-rise {
+  0% {
+    opacity: 0;
+    transform: translateX(-18px) translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) translateY(0);
+  }
+}
+
+@keyframes brand-loader-appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes brand-loader-run {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-home-button,
+  .brand-home-button__mark,
+  .brand-splash,
+  .brand-splash__stage,
+  .brand-splash__mark,
+  .brand-splash__copy,
+  .brand-splash__wordmark,
+  .brand-splash__loader,
+  .brand-splash__loader span {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* Synthetiq Redact brand colour pass. This deliberately remaps the old
+   green/blue prototype accents to the logo palette without disturbing layout. */
+.brand-theme {
+  background: #f5f6f8;
+  color: var(--sr-text);
+}
+
+.brand-theme .bg-slate-900 {
+  background-color: var(--sr-black) !important;
+}
+
+.brand-theme .bg-slate-800 {
+  background-color: var(--sr-black-2) !important;
+}
+
+.brand-theme .hover\:bg-slate-800:hover,
+.brand-theme .hover\:bg-slate-700:hover {
+  background-color: var(--sr-black-3) !important;
+}
+
+.brand-theme .border-slate-800 {
+  border-color: #25282b !important;
+}
+
+.brand-theme .text-slate-900,
+.brand-theme .text-slate-950 {
+  color: var(--sr-text) !important;
+}
+
+.brand-theme .bg-emerald-50,
+.brand-theme .bg-blue-50 {
+  background-color: var(--sr-red-soft) !important;
+}
+
+.brand-theme .bg-emerald-100,
+.brand-theme .bg-blue-100 {
+  background-color: var(--sr-red-soft-2) !important;
+}
+
+.brand-theme .border-emerald-200,
+.brand-theme .border-blue-200,
+.brand-theme .border-blue-300 {
+  border-color: var(--sr-red-border) !important;
+}
+
+.brand-theme .border-emerald-300,
+.brand-theme .border-emerald-500,
+.brand-theme .border-blue-400 {
+  border-color: var(--sr-red) !important;
+}
+
+.brand-theme .bg-emerald-500,
+.brand-theme .bg-emerald-600,
+.brand-theme .bg-emerald-700,
+.brand-theme .bg-blue-500,
+.brand-theme .bg-blue-600,
+.brand-theme .bg-blue-700 {
+  background-color: var(--sr-red) !important;
+}
+
+.brand-theme .hover\:bg-emerald-50:hover,
+.brand-theme .hover\:bg-blue-50:hover {
+  background-color: var(--sr-red-soft) !important;
+}
+
+.brand-theme .hover\:bg-emerald-100:hover,
+.brand-theme .hover\:bg-blue-100:hover {
+  background-color: var(--sr-red-soft-2) !important;
+}
+
+.brand-theme .hover\:bg-emerald-500:hover,
+.brand-theme .hover\:bg-emerald-600:hover,
+.brand-theme .hover\:bg-blue-500:hover,
+.brand-theme .hover\:bg-blue-600:hover {
+  background-color: var(--sr-red-hover) !important;
+}
+
+.brand-theme .active\:bg-emerald-800:active,
+.brand-theme .active\:bg-blue-700:active {
+  background-color: var(--sr-red-active) !important;
+}
+
+.brand-theme .text-emerald-300,
+.brand-theme .text-emerald-400,
+.brand-theme .text-emerald-500,
+.brand-theme .text-emerald-600,
+.brand-theme .text-emerald-700,
+.brand-theme .text-emerald-800,
+.brand-theme .text-emerald-900,
+.brand-theme .text-emerald-950,
+.brand-theme .text-blue-400,
+.brand-theme .text-blue-500,
+.brand-theme .text-blue-600,
+.brand-theme .text-blue-700,
+.brand-theme .text-blue-800,
+.brand-theme .text-blue-900,
+.brand-theme .text-blue-950 {
+  color: var(--sr-red) !important;
+}
+
+.brand-theme .focus\:border-emerald-500:focus,
+.brand-theme .focus\:border-blue-400:focus {
+  border-color: var(--sr-red) !important;
+}
+
+.brand-theme .focus\:ring-emerald-100:focus,
+.brand-theme .focus\:ring-blue-100:focus {
+  --tw-ring-color: rgb(254 226 226 / 1) !important;
+}
+
+.brand-theme .border-t-emerald-600,
+.brand-theme .border-t-blue-700 {
+  border-top-color: var(--sr-red) !important;
+}
+
+.brand-theme .ring-emerald-400 {
+  --tw-ring-color: rgb(239 68 68 / 1) !important;
+}
+
+.brand-theme .bg-white {
+  background-color: #ffffff;
+}
+
+.brand-theme table thead {
+  box-shadow: inset 0 -1px 0 var(--sr-line);
+}
+
+.brand-theme .status-badge--processing,
+.brand-theme .status-badge--preprocessing,
+.brand-theme .status-badge--ocr,
+.brand-theme .status-badge--redaction,
+.brand-theme .status-badge--translation,
+.brand-theme .status-badge--classification,
+.brand-theme .status-badge--routing {
+  background-color: var(--sr-red-soft);
+  color: var(--sr-red);
+}
+
+.brand-theme .status-badge--complete {
+  background-color: #f3f4f6;
+  color: var(--sr-black);
+}
+
+.brand-theme .brand-home-button__version {
+  color: var(--sr-red);
 }

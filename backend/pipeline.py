@@ -37,11 +37,15 @@ from vision_verifier import compare_ocr_and_vision, run_vision_verification
 # review-assist only and must never replace OCR/text redaction.
 ENABLE_IMAGE_REDACTION_DETECTOR = os.environ.get("ENABLE_IMAGE_REDACTION_DETECTOR", "0") == "1"
 
-# Optional hybrid GLM-OCR + geometry mapping for precise value-level redaction.
-# Off by default: when on, sensitive values are detected on GLM-OCR's clean text
-# and mapped to EasyOCR word boxes by RedactionGeometryMapper. Falls back to the
-# existing OCR map_to_bboxes path if GLM-OCR is unavailable.
-USE_GLM_GEOMETRY_REDACTION = os.environ.get("USE_GLM_GEOMETRY_REDACTION", "0") == "1"
+# Hybrid GLM-OCR + geometry mapping for precise value-level redaction.
+# This is the main Synthetiq Redact v3 path. It is strict by default: weaker OCR
+# geometry fallbacks only run when explicitly enabled by settings or env.
+USE_GLM_GEOMETRY_REDACTION = os.environ.get("USE_GLM_GEOMETRY_REDACTION", "1") != "0"
+ALLOW_OCR_GEOMETRY_FALLBACK = os.environ.get("ALLOW_OCR_GEOMETRY_FALLBACK", "0") == "1"
+
+
+class MainRedactionEngineUnavailable(RuntimeError):
+    """Raised when strict v3 processing cannot use the main GLM geometry path."""
 
 
 def _pdf_page_count(path: str) -> Optional[int]:
@@ -55,8 +59,12 @@ def _pdf_page_count(path: str) -> Optional[int]:
 
 
 def _public_error_message(exc: Exception) -> str:
+    if isinstance(exc, MainRedactionEngineUnavailable):
+        return str(exc)
     message = str(exc)
     lower = message.lower()
+    if "synthetiq redact v3" in lower or "glm" in lower:
+        return message
     if "pdf" in lower:
         return "The PDF could not be rendered. Check that the file is valid and PDF rendering support is installed."
     if "word" in lower or "docx" in lower:
@@ -236,11 +244,14 @@ class DocumentPipeline:
         onto EasyOCR word boxes by RedactionGeometryMapper.
 
         Returns redaction_meta in the same shape as RedactionEngine.map_to_bboxes
-        (so the existing insertion + image-burning code is reused unchanged), or
-        None to signal the caller should fall back to the OCR mapping path.
+        (so the existing insertion + image-burning code is reused unchanged).
+        Raises MainRedactionEngineUnavailable when strict v3 cannot run.
         """
         if not words:
-            return None
+            raise MainRedactionEngineUnavailable(
+                "Synthetiq Redact v3 could not run because OCR word geometry was unavailable. "
+                "Turn on OCR fallback in Preferences only if you want the weaker fallback path."
+            )
         try:
             from glm_ocr_engine import get_glm_engine, GLMOCRUnavailable
             from redaction_geometry_mapper import RedactionGeometryMapper
@@ -249,8 +260,11 @@ class DocumentPipeline:
             try:
                 glm_text = get_glm_engine().transcribe(source_image)
             except GLMOCRUnavailable as exc:
-                logger.info("GLM-OCR unavailable, falling back to OCR mapping: %s", exc)
-                return None
+                logger.info("GLM-OCR unavailable: %s", exc)
+                raise MainRedactionEngineUnavailable(
+                    "Synthetiq Redact v3 could not run because GLM OCR is unavailable. "
+                    "Start Ollama with glm-ocr:latest, or explicitly turn on OCR fallback in Preferences."
+                ) from exc
 
             # Surface GLM's clean transcription in the review UI (the raw OCR text
             # stays in extracted_text for word-box mapping).
@@ -283,14 +297,26 @@ class DocumentPipeline:
                 doc.flag_needs_review = True
                 review_reasons.append(f"{page_label}: GLM geometry redaction flagged candidates for review")
             return meta
-        except Exception as exc:  # pragma: no cover - defensive, never break processing
-            logger.warning("GLM geometry redaction failed, falling back to OCR mapping: %s", exc)
-            return None
+        except MainRedactionEngineUnavailable:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("GLM geometry redaction failed: %s", exc)
+            raise MainRedactionEngineUnavailable(
+                "Synthetiq Redact v3 failed during value-to-page mapping. "
+                "Turn on OCR fallback in Preferences only if you want the weaker fallback path."
+            ) from exc
 
-    async def process(self, doc_id: int, db_session: Optional[Session] = None, translate_enabled: bool = True) -> None:
+    async def process(
+        self,
+        doc_id: int,
+        db_session: Optional[Session] = None,
+        translate_enabled: bool = True,
+        allow_fallback_ocr: Optional[bool] = None,
+    ) -> None:
         """Main async processing pipeline with first-class multi-page support."""
         db = db_session or SessionLocal()
         own_session = db_session is None
+        fallback_allowed = ALLOW_OCR_GEOMETRY_FALLBACK if allow_fallback_ocr is None else bool(allow_fallback_ocr)
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
             if not doc:
@@ -408,24 +434,42 @@ class DocumentPipeline:
                 await self._set_status(db, doc, "redaction", f"Finding sensitive data on {page_label}")
                 redaction_meta = None
                 if USE_GLM_GEOMETRY_REDACTION:
-                    redaction_meta = self._glm_geometry_meta(
-                        page, words, allowed_types, review_reasons, page_label, doc, ocr_record
-                    )
-                    if redaction_meta is not None:
+                    try:
+                        redaction_meta = self._glm_geometry_meta(
+                            page, words, allowed_types, review_reasons, page_label, doc, ocr_record
+                        )
                         redaction_engine_paths.add("synthetiq_redact_v3_glm_geometry")
-                    else:
+                    except MainRedactionEngineUnavailable as exc:
+                        if not fallback_allowed:
+                            redaction_engine_paths.add("synthetiq_redact_v3_unavailable")
+                            doc.engine_used = ",".join(sorted(redaction_engine_paths))
+                            doc.flag_needs_review = True
+                            doc.needs_review_reason = f"{page_label}: {exc}"
+                            db.commit()
+                            raise
                         redaction_engine_paths.add("fallback_easyocr_geometry_glm_unavailable")
                         doc.flag_needs_review = True
                         review_reasons.append(
                             f"{page_label}: Synthetiq Redact v3 GLM geometry unavailable; fallback OCR geometry used"
                         )
                 else:
+                    if not fallback_allowed:
+                        redaction_engine_paths.add("synthetiq_redact_v3_config_off")
+                        doc.engine_used = ",".join(sorted(redaction_engine_paths))
+                        doc.flag_needs_review = True
+                        doc.needs_review_reason = (
+                            f"{page_label}: Synthetiq Redact v3 is disabled. "
+                            "Turn it on or explicitly enable OCR fallback in Preferences."
+                        )
+                        db.commit()
+                        raise MainRedactionEngineUnavailable(doc.needs_review_reason)
                     redaction_engine_paths.add("fallback_easyocr_geometry_config_off")
                 if redaction_meta is None:
                     redaction_meta = self.redaction.map_to_bboxes(sensitive_spans, words)
-                redaction_meta.extend(
-                    self.redaction.map_label_lines_to_bboxes(words, allowed_types)
-                )
+                if fallback_allowed:
+                    redaction_meta.extend(
+                        self.redaction.map_label_lines_to_bboxes(words, allowed_types)
+                    )
                 redaction_meta = _dedupe_redaction_meta(redaction_meta)
 
                 clean_spans = self.redaction.detect_sensitive_text(
@@ -467,12 +511,14 @@ class DocumentPipeline:
                 mask_path = self.redaction.generate_mask_overlay(redaction_image_path, redaction_meta, out_dir=page_out_folder)
                 redacted_text = self.redaction.redact_text(clean_text, clean_spans)
 
-                hw_applied = self.redaction.handwriting_safety_pass(
-                    redacted_path,
-                    words,
-                    avg_confidence,
-                    allowed_types,
-                )
+                hw_applied = False
+                if fallback_allowed:
+                    hw_applied = self.redaction.handwriting_safety_pass(
+                        redacted_path,
+                        words,
+                        avg_confidence,
+                        allowed_types,
+                    )
                 if hw_applied:
                     doc.flag_needs_review = True
                     review_reasons.append(f"{page_label}: handwriting/low-confidence safety pass applied")

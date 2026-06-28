@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { uploadDocument } from '../api';
+import { readProcessingSettings } from '../cache';
 
 const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.pdf', '.docx', '.gif', '.bmp', '.tiff', '.tif'];
 const ACCEPTED_INPUT = 'image/png,image/jpeg,image/gif,image/bmp,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.png,.jpg,.jpeg,.pdf,.docx,.gif,.bmp,.tiff,.tif';
@@ -123,7 +124,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
     setError(null);
     setProgress({ status: 'uploaded', message: 'Uploading...', percent: 5 });
     try {
-      const result = await uploadDocument(file, translateEnabled, selectedCategory);
+      const result = await uploadDocument(file, translateEnabled, selectedCategory, readProcessingSettings());
       if (result?.document_id) {
         setDocId(result.document_id);
         setScreen('review');

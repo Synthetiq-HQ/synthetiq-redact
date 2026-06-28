@@ -56,6 +56,7 @@ function Start-Backend {
     }
     $command = @"
 `$env:USE_GLM_GEOMETRY_REDACTION='1'
+`$env:ALLOW_OCR_GEOMETRY_FALLBACK='0'
 `$env:OLLAMA_HOST='http://127.0.0.1:11434'
 `$env:GLM_OCR_MODEL='glm-ocr:latest'
 Set-Location '$backendDir'

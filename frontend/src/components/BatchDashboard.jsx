@@ -1,211 +1,241 @@
-import { useState, useEffect } from 'react';
-import api from '../api';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { listBatches, getBatchStatus, createBatch } from '../api';
+import { readProcessingSettings } from '../cache';
+import StatusBadge from './StatusBadge';
 
-export default function BatchDashboard({ setScreen, setDocId }) {
-  const [jobs, setJobs] = useState([]);
+const ACCEPTED = ['.png', '.jpg', '.jpeg', '.pdf', '.docx', '.gif', '.bmp', '.tiff', '.tif'];
+
+function accepted(file) {
+  const n = file.name.toLowerCase();
+  return ACCEPTED.some((ext) => n.endsWith(ext));
+}
+
+function formatTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString();
+}
+
+function ProgressBar({ percent, status }) {
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+      <div
+        className={`h-full rounded-full transition-all ${status === 'complete' ? 'bg-emerald-500' : status === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`}
+        style={{ width: `${Math.round(percent || 0)}%` }}
+      />
+    </div>
+  );
+}
+
+export default function BatchDashboard({ setScreen, setDocId, setDocData }) {
+  const [view, setView] = useState('list'); // 'list' | 'detail'
+  const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [activeBatch, setActiveBatch] = useState(null);
+  const filesRef = useRef(null);
+  const folderRef = useRef(null);
 
-  useEffect(() => {
-    loadJobs();
-    const interval = setInterval(loadJobs, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const loadJobs = async () => {
+  const loadBatches = useCallback(async () => {
     try {
-      // In a real implementation, this would call GET /api/batch/list
-      // For now, we mock the data structure
-      setJobs([
-        {
-          id: 'batch-001',
-          name: 'Housing Applications Q1',
-          status: 'complete',
-          total_docs: 60,
-          processed_docs: 60,
-          failed_docs: 0,
-          progress_percent: 100,
-          created_at: '2026-04-28T10:00:00Z',
-          completed_at: '2026-04-28T10:15:00Z',
-        },
-        {
-          id: 'batch-002',
-          name: 'Parking Appeals April',
-          status: 'processing',
-          total_docs: 20,
-          processed_docs: 9,
-          failed_docs: 0,
-          progress_percent: 45,
-          created_at: '2026-04-30T09:00:00Z',
-        },
-      ]);
-      setLoading(false);
+      const data = await listBatches();
+      setBatches(data.batches || []);
+      setError('');
     } catch (err) {
-      console.error('Failed to load batches:', err);
+      setError(err.response?.data?.detail || 'Could not load batches.');
+    } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const handleFileSelect = (e) => {
-    setSelectedFiles(Array.from(e.target.files));
+  useEffect(() => {
+    loadBatches();
+    const id = window.setInterval(loadBatches, 8000);
+    return () => window.clearInterval(id);
+  }, [loadBatches]);
+
+  const openBatch = useCallback(async (batchId) => {
+    setView('detail');
+    setActiveBatch({ id: batchId, loading: true });
+    try {
+      const data = await getBatchStatus(batchId);
+      setActiveBatch(data);
+    } catch {
+      setActiveBatch({ id: batchId, error: 'Could not load this batch.' });
+    }
+  }, []);
+
+  // Poll the open batch while it is still processing.
+  useEffect(() => {
+    if (view !== 'detail' || !activeBatch?.id) return undefined;
+    if (!['queued', 'processing'].includes(activeBatch.status)) return undefined;
+    const id = window.setInterval(async () => {
+      try { setActiveBatch(await getBatchStatus(activeBatch.id)); } catch { /* ignore */ }
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [view, activeBatch?.id, activeBatch?.status]);
+
+  const addFiles = (fileList) => {
+    const next = Array.from(fileList).filter(accepted);
+    setSelectedFiles((prev) => {
+      const seen = new Set(prev.map((f) => f.name + f.size));
+      return [...prev, ...next.filter((f) => !seen.has(f.name + f.size))];
+    });
   };
 
   const handleUpload = async () => {
-    if (selectedFiles.length === 0) return;
-    
+    if (!selectedFiles.length) return;
     setUploading(true);
-    const formData = new FormData();
-    selectedFiles.forEach(file => formData.append('files', file));
-    formData.append('name', 'Batch Upload ' + new Date().toLocaleString());
-    
+    setError('');
     try {
-      await api.post('/batch', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      await createBatch(selectedFiles, false, readProcessingSettings());
       setSelectedFiles([]);
-      loadJobs();
+      if (filesRef.current) filesRef.current.value = '';
+      if (folderRef.current) folderRef.current.value = '';
+      await loadBatches();
     } catch (err) {
-      console.error('Upload failed:', err);
-      alert('Upload failed: ' + (err.response?.data?.detail || err.message));
+      setError(err.response?.data?.detail || 'Batch upload failed.');
     } finally {
       setUploading(false);
     }
   };
 
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'complete': return 'bg-emerald-100 text-emerald-700 border-emerald-200';
-      case 'processing': return 'bg-blue-100 text-blue-700 border-blue-200';
-      case 'queued': return 'bg-slate-100 text-slate-600 border-slate-200';
-      case 'failed': return 'bg-red-100 text-red-700 border-red-200';
-      default: return 'bg-slate-100 text-slate-600';
-    }
+  const openDoc = (doc) => {
+    setDocId(doc.id);
+    setDocData?.(doc);
+    setScreen('review');
   };
 
-  const getStatusIcon = (status) => {
-    switch (status) {
-      case 'complete': return '✅';
-      case 'processing': return '⏳';
-      case 'queued': return '⏸️';
-      case 'failed': return '❌';
-      default: return '○';
-    }
-  };
-
-  return (
-    <div className="min-h-[calc(100dvh-4rem)] bg-slate-50 p-4">
-      <div className="max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-800">Batch Processing</h1>
-            <p className="text-sm text-slate-500">Upload and process multiple documents at once</p>
-          </div>
-        </div>
-
-        {/* Upload section */}
-        <div className="bg-white rounded-lg border border-slate-200 p-6 mb-6">
-          <h2 className="font-bold text-slate-800 mb-4">Upload New Batch</h2>
-          
-          <div className="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center hover:border-emerald-500 transition-colors">
-            <input
-              type="file"
-              multiple
-              accept=".png,.jpg,.jpeg,.pdf"
-              onChange={handleFileSelect}
-              className="hidden"
-              id="batch-upload"
-            />
-            <label htmlFor="batch-upload" className="cursor-pointer">
-              <div className="text-4xl mb-2">📁</div>
-              <p className="text-sm font-medium text-slate-700">
-                {selectedFiles.length > 0 
-                  ? `${selectedFiles.length} files selected` 
-                  : 'Drop files here or click to select'}
-              </p>
-              <p className="text-xs text-slate-400 mt-1">
-                Supports: PNG, JPG, JPEG, PDF
-              </p>
-            </label>
-          </div>
-          
-          {selectedFiles.length > 0 && (
-            <div className="mt-4 flex items-center justify-between">
-              <div className="text-sm text-slate-600">
-                {selectedFiles.map(f => f.name).join(', ')}
-              </div>
-              <button
-                onClick={handleUpload}
-                disabled={uploading}
-                className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {uploading ? 'Uploading...' : '🚀 Start Processing'}
-              </button>
+  // ---- Detail view -----------------------------------------------------
+  if (view === 'detail') {
+    const b = activeBatch || {};
+    const docs = b.documents || [];
+    return (
+      <div className="flex h-full min-h-0 flex-col rounded-md border border-slate-200 bg-white">
+        <div className="flex items-center gap-3 border-b border-slate-200 px-3 py-2">
+          <button
+            type="button"
+            onClick={() => { setView('list'); setActiveBatch(null); loadBatches(); }}
+            className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            ← Batches
+          </button>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-bold text-slate-900">{b.name || 'Batch'}</div>
+            <div className="text-xs text-slate-500">
+              {b.processed_docs ?? 0}/{b.total_docs ?? 0} processed
+              {b.failed_docs ? ` · ${b.failed_docs} failed` : ''} · {formatTime(b.created_at)}
             </div>
+          </div>
+          {b.status && <div className="ml-auto"><StatusBadge status={b.status} /></div>}
+        </div>
+        {['queued', 'processing'].includes(b.status) && (
+          <div className="px-3 py-2"><ProgressBar percent={b.progress_percent} status={b.status} /></div>
+        )}
+        <div className="min-h-0 flex-1 overflow-auto">
+          {b.loading ? (
+            <div className="p-6 text-center text-sm text-slate-400">Loading batch…</div>
+          ) : docs.length === 0 ? (
+            <div className="p-6 text-center text-sm text-slate-400">No documents in this batch.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-left text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                <tr><th className="px-3 py-2">ID</th><th className="px-3 py-2">Filename</th><th className="px-3 py-2">Status</th><th className="px-3 py-2" /></tr>
+              </thead>
+              <tbody>
+                {docs.map((d) => (
+                  <tr key={d.id} onClick={() => openDoc(d)} className="cursor-pointer border-t border-slate-100 hover:bg-slate-50">
+                    <td className="px-3 py-2 font-mono text-xs text-slate-400">{d.id}</td>
+                    <td className="max-w-[280px] truncate px-3 py-2 font-medium text-slate-800">
+                      {d.filename || 'Untitled'}
+                      {d.flag_needs_review && <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">review</span>}
+                    </td>
+                    <td className="px-3 py-2"><StatusBadge status={d.status} /></td>
+                    <td className="px-3 py-2 text-right">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); openDoc(d); }}
+                        className="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Open</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
+      </div>
+    );
+  }
 
-        {/* Jobs list */}
-        <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200">
-            <h2 className="font-bold text-slate-800">Processing Jobs</h2>
+  // ---- List view -------------------------------------------------------
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      {/* Upload */}
+      <div className="rounded-md border border-slate-200 bg-white p-3">
+        <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">New batch</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input ref={filesRef} type="file" multiple accept={ACCEPTED.join(',')} className="hidden"
+            onChange={(e) => addFiles(e.target.files)} id="batch-files" />
+          <input ref={folderRef} type="file" multiple webkitdirectory="" directory="" className="hidden"
+            onChange={(e) => addFiles(e.target.files)} id="batch-folder" />
+          <button type="button" onClick={() => filesRef.current?.click()}
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Select files</button>
+          <button type="button" onClick={() => folderRef.current?.click()}
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Select folder</button>
+          <span className="text-xs text-slate-500">{selectedFiles.length ? `${selectedFiles.length} file(s) ready` : 'PNG, JPG, TIFF, PDF, DOCX'}</span>
+          <div className="ml-auto flex items-center gap-2">
+            {selectedFiles.length > 0 && (
+              <button type="button" onClick={() => setSelectedFiles([])}
+                className="rounded-md px-2 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-100">Clear</button>
+            )}
+            <button type="button" onClick={handleUpload} disabled={uploading || !selectedFiles.length}
+              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50">
+              {uploading ? 'Uploading…' : 'Start batch'}
+            </button>
           </div>
-          
+        </div>
+      </div>
+
+      {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+
+      {/* Batches list */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white">
+        <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
+          <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Batches</span>
+          <button type="button" onClick={loadBatches} className="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">Refresh</button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto">
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
-            </div>
-          ) : jobs.length === 0 ? (
-            <div className="text-center py-12 text-slate-400">
-              <div className="text-4xl mb-2">📭</div>
-              <p>No batch jobs yet</p>
-            </div>
+            <div className="p-6 text-center text-sm text-slate-400">Loading…</div>
+          ) : batches.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-400">No batches yet. Select files or a folder above to start one.</div>
           ) : (
-            <div className="divide-y divide-slate-200">
-              {jobs.map(job => (
-                <div key={job.id} className="px-6 py-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">{getStatusIcon(job.status)}</span>
-                      <div>
-                        <h3 className="font-semibold text-slate-800">{job.name}</h3>
-                        <p className="text-xs text-slate-500">ID: {job.id}</p>
-                      </div>
-                    </div>
-                    <span className={`px-2 py-1 rounded-full text-xs font-bold border ${getStatusColor(job.status)}`}>
-                      {job.status.toUpperCase()}
-                    </span>
-                  </div>
-                  
-                  {/* Progress bar */}
-                  <div className="mt-3">
-                    <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-                      <span>{job.processed_docs} / {job.total_docs} processed</span>
-                      <span>{job.progress_percent}%</span>
-                    </div>
-                    <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                      <div 
-                        className={`h-full rounded-full transition-all ${
-                          job.status === 'complete' ? 'bg-emerald-500' : 'bg-blue-500'
-                        }`}
-                        style={{ width: `${job.progress_percent}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                  
-                  {/* Stats */}
-                  <div className="flex items-center gap-4 mt-3 text-xs text-slate-500">
-                    <span>✅ {job.processed_docs} done</span>
-                    {job.failed_docs > 0 && <span>❌ {job.failed_docs} failed</span>}
-                    <span>📅 {new Date(job.created_at).toLocaleDateString()}</span>
-                    {job.completed_at && (
-                      <span>🏁 {new Date(job.completed_at).toLocaleDateString()}</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-left text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Batch</th><th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2 w-40">Progress</th><th className="px-3 py-2">Created</th><th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((b) => (
+                  <tr key={b.id} onClick={() => openBatch(b.id)} className="cursor-pointer border-t border-slate-100 hover:bg-slate-50">
+                    <td className="max-w-[240px] truncate px-3 py-2 font-medium text-slate-800">{b.name || b.id}</td>
+                    <td className="px-3 py-2"><StatusBadge status={b.status} /></td>
+                    <td className="px-3 py-2">
+                      <ProgressBar percent={b.progress_percent} status={b.status} />
+                      <div className="mt-1 text-[10px] text-slate-400">{b.processed_docs}/{b.total_docs}{b.failed_docs ? ` · ${b.failed_docs} failed` : ''}</div>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-500">{formatTime(b.created_at)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button type="button" onClick={(e) => { e.stopPropagation(); openBatch(b.id); }}
+                        className="rounded-md border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Open</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       </div>

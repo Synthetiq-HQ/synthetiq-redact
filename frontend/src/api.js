@@ -70,10 +70,11 @@ api.interceptors.response.use(
 
 // --- Named API helpers used by components ---
 
-export async function uploadDocument(file, translateEnabled, selectedCategory) {
+export async function uploadDocument(file, translateEnabled, selectedCategory, options = {}) {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('translate', translateEnabled ? 'true' : 'false');
+  formData.append('allow_ocr_fallback', options.allowOcrFallback ? 'true' : 'false');
   if (selectedCategory) {
     formData.append('category', selectedCategory);
   }
@@ -155,6 +156,12 @@ export async function getDocument(docId) {
   return res.data;
 }
 
+export async function getHealth() {
+  // /health is mounted at the API root (not under /api).
+  const res = await axios.get(`${API_BASE}/health`, { timeout: 4000 });
+  return res.data;
+}
+
 export async function getDocumentPages(docId) {
   const res = await api.get(`/document/${docId}/pages`);
   return res.data;
@@ -165,8 +172,9 @@ export async function getDocumentPage(docId, pageNumber = 1) {
   return res.data;
 }
 
-export function getImageUrl(docId, type = 'original') {
-  return `${API_BASE}/api/document/${docId}/image?type=${type}`;
+export function getImageUrl(docId, type = 'original', revision = '') {
+  const cacheBust = revision ? `&v=${encodeURIComponent(revision)}` : '';
+  return `${API_BASE}/api/document/${docId}/image?type=${type}${cacheBust}`;
 }
 
 export async function getImageBlobUrl(docId, type = 'original') {
@@ -215,6 +223,52 @@ export async function downloadExport(docId, type = 'text') {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function exportToFolder(docId, type = 'pdf', folderPath = '') {
+  const formData = new FormData();
+  formData.append('type', type);
+  if (folderPath) formData.append('folder_path', folderPath);
+  const res = await api.post(`/document/${docId}/export-to-folder`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return res.data;
+}
+
+function downloadBlob(blob, fallbackName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function filenameFromDisposition(contentDisposition, fallbackName) {
+  const match = String(contentDisposition || '').match(/filename="?([^"]+)"?/i);
+  return match?.[1] || fallbackName;
+}
+
+export async function downloadDocumentImage(docId, imageType = 'original') {
+  const res = await api.get(`/document/${docId}/image`, {
+    params: { type: imageType },
+    responseType: 'blob',
+  });
+  const extension = imageType === 'redacted' ? 'png' : 'png';
+  downloadBlob(res.data, `document_${docId}_${imageType}.${extension}`);
+}
+
+export async function downloadOriginalFile(docId) {
+  const res = await api.get(`/document/${docId}/original-file`, {
+    responseType: 'blob',
+  });
+  const filename = filenameFromDisposition(
+    res.headers['content-disposition'],
+    `document_${docId}_original`
+  );
+  downloadBlob(res.data, filename);
 }
 
 export async function listDocuments() {
@@ -352,10 +406,11 @@ export async function assignReview(docId) {
   return res.data;
 }
 
-export async function createBatch(files, translateEnabled = false) {
+export async function createBatch(files, translateEnabled = false, options = {}) {
   const formData = new FormData();
   files.forEach((f) => formData.append('files', f));
   formData.append('translate', translateEnabled ? 'true' : 'false');
+  formData.append('allow_ocr_fallback', options.allowOcrFallback ? 'true' : 'false');
   const res = await api.post('/batch', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
@@ -364,6 +419,11 @@ export async function createBatch(files, translateEnabled = false) {
 
 export async function getBatchStatus(jobId) {
   const res = await api.get(`/batch/${jobId}`);
+  return res.data;
+}
+
+export async function listBatches() {
+  const res = await api.get('/batches');
   return res.data;
 }
 

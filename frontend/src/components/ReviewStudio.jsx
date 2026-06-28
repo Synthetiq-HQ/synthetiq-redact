@@ -3,7 +3,6 @@ import api, {
   approveAllRedactions,
   createManualRedaction,
   createTextRedaction,
-  downloadExport,
   getDocumentHistory,
   getDocumentPage,
   getImageBlobUrl,
@@ -14,6 +13,8 @@ import api, {
   undoLastAction,
   verifyExport,
 } from '../api';
+import { readCachedDocument, writeCachedDocument } from '../cache';
+import ExportMenu from './ExportMenu';
 
 const VIEW_MODES = [
   { id: 'original', label: 'Original' },
@@ -101,6 +102,14 @@ function normaliseEngineStatus(status, engineUsed = '') {
       engine_used: engineUsed,
     };
   }
+  if (engineUsed.includes('synthetiq_redact_v3_unavailable') || engineUsed.includes('synthetiq_redact_v3_config_off')) {
+    return {
+      mode: 'blocked',
+      label: 'v3 unavailable',
+      detail: 'Synthetiq Redact v3 could not run and fallback is off',
+      engine_used: engineUsed,
+    };
+  }
   return {
     mode: 'pending',
     label: 'Selecting engine',
@@ -112,6 +121,7 @@ function normaliseEngineStatus(status, engineUsed = '') {
 function engineBadgeClass(mode) {
   if (mode === 'main') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   if (mode === 'fallback') return 'border-red-200 bg-red-50 text-red-800';
+  if (mode === 'blocked') return 'border-red-300 bg-red-50 text-red-900';
   if (mode === 'unknown') return 'border-amber-200 bg-amber-50 text-amber-800';
   return 'border-slate-200 bg-slate-50 text-slate-600';
 }
@@ -298,6 +308,7 @@ function DocumentCanvas({
   stageRef,
   scrollRef,
   onScroll,
+  onWheelZoom,
   beginDraw,
   continueDraw,
   finishDraw,
@@ -305,11 +316,15 @@ function DocumentCanvas({
   pendingCreates = [],
   pendingChange,
   startEdit,
+  clearSelection,
   disabledOverlay,
   liveRedactionPreview = false,
   processingActive = false,
   processingMessage = '',
 }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const panSessionRef = useRef(null);
   const pendingEditId = pendingChange?.mode === 'edit' ? pendingChange.redactionId : null;
   const previewRedactions = redactions
     .filter((redaction) => redaction.status !== 'rejected')
@@ -318,6 +333,64 @@ function DocumentCanvas({
       return rect ? { redaction, rect } : null;
     })
     .filter(Boolean);
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imageUrl]);
+
+  useEffect(() => {
+    if (!isPanning) return undefined;
+
+    const handleMouseMove = (event) => {
+      const session = panSessionRef.current;
+      if (!session?.scrollElement) return;
+      event.preventDefault();
+      const dx = event.clientX - session.startX;
+      const dy = event.clientY - session.startY;
+      session.scrollElement.scrollLeft = session.scrollLeft - dx;
+      session.scrollElement.scrollTop = session.scrollTop - dy;
+      onScroll?.();
+    };
+
+    const stopPanning = () => {
+      panSessionRef.current = null;
+      setIsPanning(false);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', stopPanning);
+    window.addEventListener('blur', stopPanning);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', stopPanning);
+      window.removeEventListener('blur', stopPanning);
+    };
+  }, [isPanning, onScroll]);
+
+  const startPan = (event) => {
+    if (event.button !== 1 || !scrollRef?.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panSessionRef.current = {
+      scrollElement: scrollRef.current,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: scrollRef.current.scrollLeft,
+      scrollTop: scrollRef.current.scrollTop,
+    };
+    setIsPanning(true);
+  };
+
+  const handleStageMouseDown = (event) => {
+    if (event.button !== 0) return;
+    if (drawEnabled) {
+      beginDraw?.(event);
+    } else {
+      clearSelection?.();
+    }
+  };
+
+  const previewUnavailable = !imageUrl || imageFailed;
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -330,26 +403,34 @@ function DocumentCanvas({
         ) : null}
       </div>
 
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="relative min-h-0 flex-1 overscroll-contain overflow-auto rounded-md border border-slate-300 bg-slate-300 p-3"
-      >
-        {imageUrl ? (
-          <div
-            ref={stageRef}
-            onMouseDown={drawEnabled ? beginDraw : undefined}
-            onMouseMove={continueDraw}
-            onMouseUp={finishDraw}
-            onMouseLeave={finishDraw}
-            className={`relative inline-block select-none bg-white shadow-sm ring-1 ring-slate-400 ${
-              drawEnabled ? 'cursor-crosshair' : 'cursor-default'
-            }`}
-            style={{
-              width: imageSize?.width ? imageSize.width * zoom : undefined,
-              height: imageSize?.height ? imageSize.height * zoom : undefined,
-            }}
-          >
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          onWheel={(event) => onWheelZoom?.(event, scrollRef?.current)}
+          onMouseDown={startPan}
+          onAuxClick={(event) => {
+            if (event.button === 1) event.preventDefault();
+          }}
+          className={`h-full overscroll-contain overflow-auto rounded-md border border-slate-300 bg-slate-300 p-3 ${
+            isPanning ? 'cursor-grabbing select-none' : 'cursor-grab'
+          }`}
+        >
+          {!previewUnavailable ? (
+            <div
+              ref={stageRef}
+              onMouseDown={handleStageMouseDown}
+              onMouseMove={continueDraw}
+              onMouseUp={finishDraw}
+              onMouseLeave={finishDraw}
+              className={`relative inline-block select-none bg-white shadow-sm ring-1 ring-slate-400 ${
+                drawEnabled ? 'cursor-crosshair' : isPanning ? 'cursor-grabbing' : 'cursor-grab'
+              }`}
+              style={{
+                width: imageSize?.width ? imageSize.width * zoom : undefined,
+                height: imageSize?.height ? imageSize.height * zoom : undefined,
+              }}
+            >
             <img
               src={imageUrl}
               alt={`${title} document`}
@@ -360,6 +441,7 @@ function DocumentCanvas({
                   height: event.currentTarget.naturalHeight,
                 });
               }}
+              onError={() => setImageFailed(true)}
               className="block h-full w-full"
             />
 
@@ -497,9 +579,9 @@ function DocumentCanvas({
                 }}
               />
             )}
-          </div>
-        ) : (
-          <div className="relative overflow-hidden rounded-md border border-slate-300 bg-white p-8 text-sm text-slate-600">
+            </div>
+          ) : (
+            <div className="relative overflow-hidden rounded-md border border-slate-300 bg-white p-8 text-sm text-slate-600">
             {processingActive ? (
               <>
                 <div className="mb-3 flex items-center gap-2 font-semibold text-blue-900">
@@ -518,8 +600,9 @@ function DocumentCanvas({
             ) : (
               'Preview image is not available.'
             )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
         {disabledOverlay && (
           <div className="absolute inset-3 z-20 flex items-center justify-center rounded-sm bg-slate-200/70 ring-1 ring-slate-400/30 backdrop-blur-[1px]">
             <div className="rounded-md border border-slate-300 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
@@ -538,6 +621,9 @@ export default function ReviewStudio({ docId, setScreen }) {
   const redactedScrollRef = useRef(null);
   const scrollSyncRef = useRef(false);
   const textRef = useRef(null);
+  const cacheHydratedRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const documentDataRef = useRef(null);
 
   const [documentData, setDocumentData] = useState(null);
   const [pages, setPages] = useState([]);
@@ -562,7 +648,40 @@ export default function ReviewStudio({ docId, setScreen }) {
   const [editSession, setEditSession] = useState(null);
   const [saving, setSaving] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [reconnectTick, setReconnectTick] = useState(0);
   const [processingProgress, setProcessingProgress] = useState(null);
+
+  useEffect(() => {
+    documentDataRef.current = documentData;
+  }, [documentData]);
+
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectTimerRef.current) return;
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      setReconnectTick((value) => value + 1);
+    }, 1500);
+  }, []);
+
+  useEffect(() => () => {
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, [docId]);
+
+  const clearReviewSelection = useCallback(() => {
+    setSelectedRedaction(null);
+    setSelection(null);
+    setPendingChange(null);
+    setPendingCreates([]);
+    setDraftRect(null);
+    setDrawStart(null);
+    setEditSession(null);
+    setDrawMode(false);
+    window.getSelection()?.removeAllRanges();
+  }, []);
 
   const currentPage = useMemo(
     () => pages.find((page) => Number(page.page_number) === Number(currentPageNumber)) || pages[0] || null,
@@ -611,9 +730,27 @@ export default function ReviewStudio({ docId, setScreen }) {
 
   const loadDocument = useCallback(async () => {
     setError('');
+    const cached = readCachedDocument(docId)?.value;
+    if (cached && cacheHydratedRef.current !== docId) {
+      cacheHydratedRef.current = docId;
+      setDocumentData(cached);
+      const cachedPages = cached.pages?.length
+        ? cached.pages
+        : [{
+          page_number: 1,
+          ocr: cached.ocr,
+          redactions: cached.redactions || [],
+          warning_count: 0,
+          redaction_count: (cached.redactions || []).filter((redaction) => redaction.status !== 'rejected').length,
+        }];
+      setPages(cachedPages);
+      setRedactions(cached.redactions || []);
+      setLoading(false);
+    }
     try {
       const res = await api.get(`/document/${docId}`);
       setDocumentData(res.data);
+      writeCachedDocument(docId, res.data);
       const nextPages = res.data.pages?.length
         ? res.data.pages
         : [{
@@ -630,16 +767,32 @@ export default function ReviewStudio({ docId, setScreen }) {
           : nextPages[0]?.page_number || 1
       ));
       setRedactions(res.data.redactions || []);
+      setNotice((current) => (
+        current.includes('cached document') || current.includes('local backend') ? '' : current
+      ));
     } catch (err) {
+      const hasUsableCache = Boolean(cached || documentDataRef.current);
+      if (!err.response && hasUsableCache) {
+        setError('');
+        setNotice('Showing cached document while the local backend starts. Live data will refresh automatically.');
+        scheduleReconnect();
+        return;
+      }
+      if (!err.response) {
+        setError('');
+        setNotice('Starting local backend. The document will open automatically when it is ready.');
+        scheduleReconnect();
+        return;
+      }
       setError(err.response?.data?.detail || 'Document could not be loaded.');
     } finally {
       setLoading(false);
     }
-  }, [docId]);
+  }, [docId, scheduleReconnect]);
 
   useEffect(() => {
     loadDocument();
-  }, [loadDocument]);
+  }, [loadDocument, reconnectTick]);
 
   useEffect(() => {
     const terminal = new Set(['complete', 'needs_review', 'in_review', 'review_approved', 'exported', 'failed', 'error']);
@@ -791,6 +944,34 @@ export default function ReviewStudio({ docId, setScreen }) {
     });
   }, [viewMode]);
 
+  const handleCanvasWheelZoom = useCallback((event, sourceMode, scrollElement) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+
+    const delta = event.deltaY < 0 ? 0.08 : -0.08;
+    const rect = scrollElement?.getBoundingClientRect();
+    const pointerX = rect ? event.clientX - rect.left : 0;
+    const pointerY = rect ? event.clientY - rect.top : 0;
+    const contentX = scrollElement ? scrollElement.scrollLeft + pointerX : 0;
+    const contentY = scrollElement ? scrollElement.scrollTop + pointerY : 0;
+
+    setZoom((currentZoom) => {
+      const nextZoom = clamp(Number((currentZoom + delta).toFixed(2)), 0.35, 2.5);
+      if (nextZoom === currentZoom) return currentZoom;
+
+      if (scrollElement) {
+        window.requestAnimationFrame(() => {
+          const ratio = nextZoom / currentZoom;
+          scrollElement.scrollLeft = Math.max(0, contentX * ratio - pointerX);
+          scrollElement.scrollTop = Math.max(0, contentY * ratio - pointerY);
+          window.requestAnimationFrame(() => syncPaneScroll(sourceMode));
+        });
+      }
+
+      return nextZoom;
+    });
+  }, [syncPaneScroll]);
+
   const updateRedaction = (redactionId, updates) => {
     setRedactions((prev) => {
       const next = prev.map((redaction) => (
@@ -834,8 +1015,6 @@ export default function ReviewStudio({ docId, setScreen }) {
 
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if (!selectedRedaction || selectedRedaction.status === 'rejected' || saving) return;
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target;
       const tagName = target?.tagName?.toLowerCase();
       if (
@@ -846,23 +1025,37 @@ export default function ReviewStudio({ docId, setScreen }) {
       ) {
         return;
       }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        clearReviewSelection();
+        return;
+      }
+      if (!selectedRedaction || selectedRedaction.status === 'rejected' || saving) return;
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       event.preventDefault();
       handleReject(selectedRedaction.id);
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedRedaction, saving]);
+  }, [selectedRedaction, saving, clearReviewSelection]);
 
   const handleApproveAll = async () => {
+    setSaving(true);
+    setError('');
+    setNotice('');
+    clearReviewSelection();
     try {
       await approveAllRedactions(docId);
       setRedactions((prev) => prev.map((redaction) => (
-        redaction.status === 'pending' ? { ...redaction, status: 'approved' } : redaction
+        redaction.status !== 'rejected' ? { ...redaction, status: 'approved' } : redaction
       )));
       await refreshCurrentPage();
+      clearReviewSelection();
     } catch (err) {
       setError(err.response?.data?.detail || 'Redactions could not be approved.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1151,24 +1344,23 @@ export default function ReviewStudio({ docId, setScreen }) {
     }
   };
 
-  const handleDownloadPdf = async () => {
+  const verifyBeforeDownload = async () => {
     setDownloading(true);
     setError('');
     try {
       const verification = await verifyExport(docId);
       if (!verification?.passed) {
         const failed = (verification?.checks || []).filter((check) => !check.passed);
-        setError(`Burned PDF verification failed: ${failed.map((check) => check.name).join(', ') || 'unknown check'}.`);
-        return;
+        throw new Error(`Burned PDF verification failed: ${failed.map((check) => check.name).join(', ') || 'unknown check'}.`);
       }
-      await downloadExport(docId, 'pdf');
     } catch (err) {
       const detail = err.response?.data?.detail;
       if (typeof detail === 'object') {
         setError(detail.message || 'PDF export verification failed.');
       } else {
-        setError(detail || 'PDF export is not available.');
+        setError(detail || err.message || 'PDF export is not available.');
       }
+      throw err;
     } finally {
       setDownloading(false);
     }
@@ -1177,11 +1369,10 @@ export default function ReviewStudio({ docId, setScreen }) {
   const handleUndo = async () => {
     setSaving(true);
     setError('');
+    setNotice('');
     try {
       await undoLastAction(docId);
-      setPendingChange(null);
-      setPendingCreates([]);
-      setSelectedRedaction(null);
+      clearReviewSelection();
       await refreshCurrentPage();
     } catch (err) {
       setError(err.response?.data?.detail || 'Nothing to undo.');
@@ -1223,6 +1414,7 @@ export default function ReviewStudio({ docId, setScreen }) {
       stageRef={originalStageRef}
       scrollRef={originalScrollRef}
       onScroll={() => syncPaneScroll('original')}
+      onWheelZoom={(event, scrollElement) => handleCanvasWheelZoom(event, 'original', scrollElement)}
       beginDraw={beginDraw}
       continueDraw={continueDraw}
       finishDraw={finishDraw}
@@ -1230,6 +1422,7 @@ export default function ReviewStudio({ docId, setScreen }) {
       pendingCreates={pendingCreates}
       pendingChange={pendingChange}
       startEdit={startEdit}
+      clearSelection={clearReviewSelection}
       disabledOverlay={false}
       processingActive={Boolean(activeProcessing)}
       processingMessage={processingProgress?.message}
@@ -1252,10 +1445,12 @@ export default function ReviewStudio({ docId, setScreen }) {
       stageRef={null}
       scrollRef={redactedScrollRef}
       onScroll={() => syncPaneScroll('redacted')}
+      onWheelZoom={(event, scrollElement) => handleCanvasWheelZoom(event, 'redacted', scrollElement)}
       draftRect={draftRect}
       pendingCreates={pendingCreates}
       pendingChange={pendingChange}
       startEdit={() => {}}
+      clearSelection={clearReviewSelection}
       disabledOverlay={drawMode && viewMode === 'both'}
       processingActive={Boolean(activeProcessing)}
       processingMessage={processingProgress?.message}
@@ -1264,15 +1459,26 @@ export default function ReviewStudio({ docId, setScreen }) {
 
   if (loading) {
     return (
-      <div className="flex h-[calc(100dvh-4rem)] items-center justify-center bg-slate-100">
+      <div className="flex h-full items-center justify-center bg-slate-100">
         <div className="h-10 w-10 rounded-full border-2 border-slate-300 border-t-slate-900 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!documentData && notice) {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-100 px-6">
+        <div className="flex max-w-md flex-col items-center gap-4 rounded-md border border-blue-200 bg-white p-6 text-center text-sm text-blue-800 shadow-sm">
+          <div className="h-10 w-10 rounded-full border-2 border-blue-100 border-t-blue-700 animate-spin" />
+          <div>{notice}</div>
+        </div>
       </div>
     );
   }
 
   if (error && !documentData) {
     return (
-      <div className="flex h-[calc(100dvh-4rem)] items-center justify-center bg-slate-100 px-6">
+      <div className="flex h-full items-center justify-center bg-slate-100 px-6">
         <div className="max-w-md rounded-md border border-red-200 bg-white p-5 text-sm text-red-700 shadow-sm">
           {error}
         </div>
@@ -1281,7 +1487,7 @@ export default function ReviewStudio({ docId, setScreen }) {
   }
 
   return (
-    <div className="flex h-[calc(100dvh-4rem)] flex-col bg-slate-100 text-slate-900">
+    <div className="flex h-full flex-col bg-slate-100 text-slate-900">
       <div className="flex min-h-[64px] items-center justify-between border-b border-slate-200 bg-white px-4">
         <div className="flex min-w-0 items-center gap-3">
           <button
@@ -1424,18 +1630,20 @@ export default function ReviewStudio({ docId, setScreen }) {
           <button
             type="button"
             onClick={handleApproveAll}
+            disabled={saving}
             className="h-9 rounded-md border border-emerald-300 bg-white px-3 text-xs font-bold text-emerald-700 hover:bg-emerald-50"
           >
             Approve all
           </button>
-          <button
-            type="button"
-            onClick={handleDownloadPdf}
+          <ExportMenu
+            docId={docId}
+            type="pdf"
+            label={downloading ? 'Verifying...' : 'Download redacted PDF'}
             disabled={downloading}
-            className="h-9 rounded-md bg-slate-950 px-4 text-xs font-bold text-white shadow-sm hover:bg-slate-800 disabled:opacity-60"
-          >
-            {downloading ? 'Verifying…' : 'Download redacted PDF'}
-          </button>
+            onBeforeExport={verifyBeforeDownload}
+            onExported={(result) => setNotice(`Saved to ${result.path}`)}
+            buttonClassName="h-9 rounded-md bg-slate-950 px-4 text-xs font-bold text-white shadow-sm hover:bg-slate-800 disabled:opacity-60"
+          />
         </div>
       </div>
 
@@ -1517,6 +1725,11 @@ export default function ReviewStudio({ docId, setScreen }) {
         </aside>
 
         <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-200 p-4">
+          {notice && (
+            <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+              {notice}
+            </div>
+          )}
           {error && (
             <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}

@@ -12,15 +12,141 @@ import DocumentList from './components/DocumentList';
 import ReviewStudio from './components/ReviewStudio';
 import ReviewQueue from './components/ReviewQueue';
 import BatchDashboard from './components/BatchDashboard';
+import Library from './components/Library';
+import Preferences from './components/Preferences';
+import { BrandHomeButton, BrandSplash, BrandWordmark } from './components/Branding';
 import {
   MULTI_USER_AUTH_ENABLED,
   clearAuthSession,
+  getHealth,
   getMe,
   getStoredUser,
   loginUser,
   logoutUser,
   registerUser,
 } from './api';
+
+const APP_VERSION = 'v3.1';
+
+// Minimal inline icons for the navigation rail (no icon dependency).
+const ICONS = {
+  new: 'M12 5v14M5 12h14',
+  inbox: 'M3 13h4l2 3h6l2-3h4M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z',
+  library: 'M4 5h16v14H4zM8 5v14M4 10h16',
+  queue: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+  batch: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+};
+
+function RailIcon({ path }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <path d={path} />
+    </svg>
+  );
+}
+
+function RailButton({ active, label, onClick, path, accent }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      className={`flex w-full flex-col items-center gap-1 py-3 text-[10px] font-semibold transition-colors ${
+        active
+          ? 'bg-slate-800 text-white'
+          : accent
+            ? 'text-emerald-300 hover:bg-slate-800 hover:text-emerald-200'
+            : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+      }`}
+    >
+      <RailIcon path={path} />
+      <span className="leading-none">{label}</span>
+    </button>
+  );
+}
+
+function SystemStatus() {
+  const [state, setState] = useState({ online: null, version: '', degraded: false });
+
+  useEffect(() => {
+    let active = true;
+    let timer = null;
+    const poll = async () => {
+      try {
+        const h = await getHealth();
+        if (active) setState({ online: true, version: h?.version || '', degraded: h?.status === 'degraded' });
+      } catch {
+        if (active) setState({ online: false, version: '', degraded: false });
+      } finally {
+        if (active) {
+          timer = window.setTimeout(poll, state.online ? 15000 : 2000);
+        }
+      }
+    };
+    poll();
+    return () => {
+      active = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [state.online]);
+
+  const color = state.online == null
+    ? 'bg-slate-500'
+    : !state.online
+      ? 'bg-red-500'
+      : state.degraded
+        ? 'bg-amber-400'
+        : 'bg-emerald-400';
+  const label = state.online == null
+    ? 'Connecting…'
+    : !state.online
+      ? 'Backend offline'
+      : state.degraded
+        ? 'Degraded'
+        : 'Online';
+
+  return (
+    <div className="flex flex-col items-center gap-1 py-3" title={`Backend ${label}${state.version ? ` · API ${state.version}` : ''}`}>
+      <span className={`h-2.5 w-2.5 rounded-full ${color} ${state.online ? 'shadow-[0_0_6px] shadow-current' : ''}`} />
+      <span className="text-[9px] font-semibold leading-none text-slate-400">{label}</span>
+    </div>
+  );
+}
+
+const SCREEN_TITLES = {
+  scan: 'New document',
+  list: 'Document inbox',
+  library: 'Library',
+  'review-queue': 'Review queue',
+  batch: 'Batch processing',
+  progress: 'Processing',
+  ocr: 'Extracted text',
+  redaction: 'Redactions',
+  translation: 'Translation',
+  routing: 'Routing',
+  final: 'Final review',
+  preferences: 'Account',
+};
+
+const LAST_WORKSPACE_KEY = 'synthetiq_redact_v31:last-workspace';
+
+function readLastWorkspace() {
+  try {
+    const raw = localStorage.getItem(LAST_WORKSPACE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLastWorkspace(data) {
+  try {
+    localStorage.setItem(LAST_WORKSPACE_KEY, JSON.stringify(data));
+  } catch {
+    // If storage is unavailable, the live app still works normally.
+  }
+}
 
 function AuthScreen({ onAuthenticated }) {
   const [mode, setMode] = useState('login');
@@ -47,11 +173,11 @@ function AuthScreen({ onAuthenticated }) {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50">
+    <div className="brand-theme min-h-[100dvh] bg-slate-50">
       <div className="mx-auto flex min-h-[100dvh] w-full max-w-md flex-col justify-center px-5">
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-5">
-            <h1 className="text-lg font-bold text-slate-900">Synthetiq Redact</h1>
+            <BrandWordmark className="h-9 max-w-[280px]" />
             <p className="mt-1 text-sm text-slate-500">
               Council redaction review workspace
             </p>
@@ -133,10 +259,34 @@ function AuthScreen({ onAuthenticated }) {
 }
 
 function AppContent({ user, onLogout }) {
-  const [screen, setScreen] = useState('scan');
-  const [docId, setDocId] = useState(null);
+  const [workspaceSeed] = useState(() => readLastWorkspace());
+  const [screen, setScreen] = useState(() => (
+    workspaceSeed.screen === 'review' && !workspaceSeed.docId ? 'list' : workspaceSeed.screen || 'list'
+  ));
+  const [docId, setDocId] = useState(() => workspaceSeed.docId || null);
   const [docData, setDocData] = useState(null);
   const [progress, setProgress] = useState({ status: '', message: '', percent: 0 });
+  const [showSplash, setShowSplash] = useState(true);
+  const [homePulseKey, setHomePulseKey] = useState(0);
+
+  useEffect(() => {
+    const stableScreens = new Set(['scan', 'list', 'library', 'review', 'batch']);
+    writeLastWorkspace({
+      screen: stableScreens.has(screen) ? screen : 'list',
+      docId,
+      savedAt: new Date().toISOString(),
+    });
+  }, [screen, docId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowSplash(false), 2700);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const goHome = () => {
+    setHomePulseKey((key) => key + 1);
+    setScreen('list');
+  };
 
   const commonProps = {
     setScreen,
@@ -166,99 +316,107 @@ function AppContent({ user, onLogout }) {
         return <FinalRecord {...commonProps} />;
       case 'list':
         return <DocumentList {...commonProps} />;
+      case 'library':
+        return <Library {...commonProps} />;
       case 'review':
         return <ReviewStudio docId={docId} setScreen={setScreen} />;
       case 'review-queue':
         return <ReviewQueue setScreen={setScreen} setDocId={setDocId} />;
       case 'batch':
         return <BatchDashboard {...commonProps} />;
+      case 'preferences':
+        return <Preferences setScreen={setScreen} />;
       default:
-        return <ScanUpload {...commonProps} />;
+        return <DocumentList {...commonProps} />;
     }
   };
 
-  // Step breadcrumb for result screens
-  const RESULT_SCREENS = ['ocr', 'redaction', 'routing', 'final'];
-  const currentStep = RESULT_SCREENS.indexOf(screen);
+  const isEditor = screen === 'review';
+  const userInitial = (user?.email || 'L').trim().charAt(0).toUpperCase();
+  const userRole = MULTI_USER_AUTH_ENABLED ? user?.role : 'local';
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50">
-      {/* Header */}
-      <header className="sticky top-0 z-50 bg-slate-900 text-white shadow-md">
-        <div className="screen-container flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-sm font-semibold leading-tight tracking-wide sm:text-base">
-              Synthetiq Redact
-            </h1>
-            <p className="text-[10px] uppercase tracking-widest text-slate-400 sm:text-xs">
-              Council redaction review
-            </p>
-          </div>
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-            <button
-              onClick={() => setScreen('review-queue')}
-              className="whitespace-nowrap rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
-            >
-              Review queue
-            </button>
-            <button
-              onClick={() => setScreen('batch')}
-              className="whitespace-nowrap rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
-            >
-              Batch
-            </button>
-            <button
-              onClick={() => setScreen('list')}
-              className="whitespace-nowrap rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
-            >
-              Documents
-            </button>
-            <button
-              onClick={() => { setScreen('scan'); setDocData(null); }}
-              className="whitespace-nowrap rounded-md bg-emerald-700 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-600"
-            >
-              New
-            </button>
-            <div className="hidden items-center gap-2 border-l border-slate-700 pl-3 text-xs text-slate-300 sm:flex">
-              <span>{user?.email}</span>
-              <span className="rounded bg-slate-800 px-2 py-1 uppercase text-slate-400">
-                {MULTI_USER_AUTH_ENABLED ? user?.role : 'local'}
-              </span>
-              {MULTI_USER_AUTH_ENABLED && (
-                <button
-                  onClick={onLogout}
-                  className="rounded-lg bg-slate-800 px-3 py-2 font-medium text-slate-200 hover:bg-slate-700"
-                >
-                  Sign out
-                </button>
-              )}
-            </div>
+    <div className="brand-theme flex h-[100dvh] w-full select-none overflow-hidden bg-slate-100 text-slate-900">
+      {/* Navigation rail */}
+      <nav className="flex w-[72px] shrink-0 flex-col border-r border-slate-800 bg-slate-900">
+        <BrandHomeButton
+          onClick={goHome}
+          active={screen === 'list'}
+          pulseKey={homePulseKey}
+        />
+        <button
+          type="button"
+          onClick={() => setScreen('list')}
+          title="Synthetiq Redact — home"
+          className="hidden"
+        >
+          <span className="text-sm font-black tracking-tight text-white">SR</span>
+          <span className="text-[8px] font-bold uppercase tracking-widest text-emerald-400">{APP_VERSION}</span>
+        </button>
+
+        <div className="flex flex-1 flex-col">
+          <RailButton label="New" path={ICONS.new} accent
+            active={screen === 'scan'} onClick={() => { setScreen('scan'); setDocData(null); }} />
+          <RailButton label="Inbox" path={ICONS.inbox}
+            active={screen === 'list'} onClick={() => setScreen('list')} />
+          <RailButton label="Library" path={ICONS.library}
+            active={screen === 'library'} onClick={() => setScreen('library')} />
+          <RailButton label="Batch" path={ICONS.batch}
+            active={screen === 'batch'} onClick={() => setScreen('batch')} />
+        </div>
+
+        <div className="border-t border-slate-800">
+          <SystemStatus />
+          <button
+            type="button"
+            onClick={() => setScreen('preferences')}
+            className={`flex w-full flex-col items-center gap-1 border-t border-slate-800 py-3 hover:bg-slate-800 ${screen === 'preferences' ? 'bg-slate-800' : ''}`}
+            title={`${user?.email || 'local user'} · ${userRole}`}>
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-white">
+              {userInitial}
+            </span>
+            <span className="text-[9px] font-semibold text-slate-400">Account</span>
+          </button>
+          <div className="flex flex-col items-center gap-1 py-2">
+            {MULTI_USER_AUTH_ENABLED && (
+              <button type="button" onClick={onLogout}
+                className="text-[9px] font-semibold text-slate-400 hover:text-white">
+                Sign out
+              </button>
+            )}
           </div>
         </div>
-        {/* Step breadcrumb shown during result review */}
-        {currentStep >= 0 && (
-          <div className="screen-container pb-2">
-            <div className="flex gap-1">
-              {[['ocr','Text'],['redaction','Redactions'],['routing','Routing'],['final','Final review']].map(([key, label], i) => (
-                <button key={key}
-                  onClick={() => docData && setScreen(key)}
-                  className={`flex-1 text-center py-1 rounded text-[10px] font-bold transition-colors ${
-                    screen === key ? 'bg-emerald-500 text-white' :
-                    i < currentStep ? 'bg-slate-700 text-slate-300' :
-                    'bg-slate-800 text-slate-500'
-                  }`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </header>
+      </nav>
 
-      {/* Main content */}
-      <main className={screen === 'review' ? 'w-full' : 'screen-container'}>
-        {renderScreen()}
-      </main>
+      {/* Workspace */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {isEditor ? (
+          <div className="min-h-0 flex-1">
+            {renderScreen()}
+          </div>
+        ) : (
+          <>
+            <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
+              <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 text-lg font-black tracking-tight text-slate-950">
+                Synthetiq Redact
+              </div>
+              <button
+                type="button"
+                onClick={() => { setScreen('scan'); setDocData(null); }}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-500"
+              >
+                + New document
+              </button>
+            </header>
+            <main className="min-h-0 flex-1 overflow-auto bg-slate-100">
+              <div className={(screen === 'list' || screen === 'batch' || screen === 'library') ? 'h-full p-3' : 'mx-auto max-w-5xl p-4'}>
+                {renderScreen()}
+              </div>
+            </main>
+          </>
+        )}
+      </div>
+      {showSplash && <BrandSplash />}
     </div>
   );
 }

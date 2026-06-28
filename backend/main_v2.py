@@ -11,6 +11,7 @@ import secrets
 import subprocess
 import io
 import zipfile
+import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -71,10 +72,14 @@ CORS_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
         "CORS_ORIGINS",
-        "http://127.0.0.1:5173,http://localhost:5173",
+        "http://127.0.0.1:5173,http://localhost:5173,http://tauri.localhost,https://tauri.localhost,tauri://localhost",
     ).split(",")
     if origin.strip()
 ]
+CORS_ORIGIN_REGEX = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"^(tauri|http|https)://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$",
+)
 
 if IS_PRODUCTION and (
     JWT_SECRET == DEFAULT_DEV_JWT_SECRET or AUDIT_SECRET == DEFAULT_DEV_AUDIT_SECRET
@@ -93,6 +98,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -985,6 +991,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     translate: str = Form("0"),
+    allow_ocr_fallback: str = Form("0"),
     selected_category: str = Form(""),
     category: str = Form(""),
     redaction_profile: str = Form("standard"),
@@ -1018,12 +1025,13 @@ async def upload_document(
     })
 
     translate_enabled = translate in ("1", "true", "True", "yes", "on")
-    background_tasks.add_task(_run_pipeline, doc.id, translate_enabled, user.id)
+    fallback_enabled = allow_ocr_fallback in ("1", "true", "True", "yes", "on")
+    background_tasks.add_task(_run_pipeline, doc.id, translate_enabled, user.id, fallback_enabled)
 
     return {"document_id": doc.id, "status": "uploaded", "message": "Document queued for processing"}
 
 
-async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> None:
+async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int, allow_fallback_ocr: bool = False) -> None:
     """Background task wrapper for pipeline.
 
     The OCR/redaction pipeline is CPU/GPU-heavy and mostly synchronous. Run it in
@@ -1035,6 +1043,7 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
         doc_id,
         translate_enabled,
         user_id,
+        allow_fallback_ocr,
     )
     if webhook_payload:
         db = SessionLocal()
@@ -1044,11 +1053,21 @@ async def _run_pipeline(doc_id: int, translate_enabled: bool, user_id: int) -> N
             db.close()
 
 
-def _run_pipeline_sync(doc_id: int, translate_enabled: bool, user_id: int) -> Optional[Dict[str, Any]]:
+def _run_pipeline_sync(
+    doc_id: int,
+    translate_enabled: bool,
+    user_id: int,
+    allow_fallback_ocr: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Synchronous worker-thread body for document processing."""
     db = SessionLocal()
     try:
-        asyncio.run(app.state.pipeline.process(doc_id, db, translate_enabled=translate_enabled))
+        asyncio.run(app.state.pipeline.process(
+            doc_id,
+            db,
+            translate_enabled=translate_enabled,
+            allow_fallback_ocr=allow_fallback_ocr,
+        ))
         
         # Log completion
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1098,6 +1117,7 @@ async def create_batch(
     name: str = Form(""),
     redaction_profile: str = Form("standard"),
     translate: str = Form("0"),
+    allow_ocr_fallback: str = Form("0"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1105,13 +1125,19 @@ async def create_batch(
     user = _ensure_user_council(db, user)
     job_id = str(uuid.uuid4())
     
+    fallback_enabled = allow_ocr_fallback in ("1", "true", "True", "yes", "on")
+
     job = BatchJob(
         id=job_id,
         council_id=user.council_id,
         name=name or f"Batch {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         status="queued",
         total_docs=len(files),
-        config={"redaction_profile": redaction_profile, "translate": translate == "1"},
+        config={
+            "redaction_profile": redaction_profile,
+            "translate": translate == "1",
+            "allow_ocr_fallback": fallback_enabled,
+        },
         created_by=user.id,
     )
     db.add(job)
@@ -1141,12 +1167,18 @@ async def create_batch(
     db.commit()
     
     # Start processing in background
-    background_tasks.add_task(_run_batch, job_id, document_ids, translate == "1", user.id)
+    background_tasks.add_task(_run_batch, job_id, document_ids, translate == "1", user.id, fallback_enabled)
     
     return {"job_id": job_id, "total_docs": len(document_ids), "status": "queued"}
 
 
-async def _run_batch(job_id: str, document_ids: List[int], translate_enabled: bool, user_id: int):
+async def _run_batch(
+    job_id: str,
+    document_ids: List[int],
+    translate_enabled: bool,
+    user_id: int,
+    allow_fallback_ocr: bool = False,
+):
     """Process all documents in a batch."""
     db = SessionLocal()
     try:
@@ -1159,7 +1191,12 @@ async def _run_batch(job_id: str, document_ids: List[int], translate_enabled: bo
         
         for i, doc_id in enumerate(document_ids):
             try:
-                await app.state.pipeline.process(doc_id, db, translate_enabled=translate_enabled)
+                await app.state.pipeline.process(
+                    doc_id,
+                    db,
+                    translate_enabled=translate_enabled,
+                    allow_fallback_ocr=allow_fallback_ocr,
+                )
                 job.processed_docs += 1
             except Exception as e:
                 job.failed_docs += 1
@@ -1189,6 +1226,38 @@ async def _run_batch(job_id: str, document_ids: List[int], translate_enabled: bo
             db.commit()
     finally:
         db.close()
+
+
+@app.get("/api/batches")
+@app.get("/api/batch")
+async def list_batches(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """List batch jobs for the current council (newest first)."""
+    user = _ensure_user_council(db, user)
+    jobs = (
+        db.query(BatchJob)
+        .filter(BatchJob.council_id == user.council_id)
+        .order_by(BatchJob.created_at.desc())
+        .all()
+    )
+    return {
+        "batches": [
+            {
+                "id": j.id,
+                "name": j.name,
+                "status": j.status,
+                "total_docs": j.total_docs,
+                "processed_docs": j.processed_docs,
+                "failed_docs": j.failed_docs,
+                "progress_percent": (j.processed_docs / j.total_docs * 100) if j.total_docs > 0 else 0,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+            }
+            for j in jobs
+        ],
+    }
 
 
 @app.get("/api/batches/{job_id}")
@@ -2144,6 +2213,14 @@ def _engine_status_payload(doc: Document) -> dict:
             "engine_used": engine_used,
             "handwriting_backend": handwriting_backend,
         }
+    if "synthetiq_redact_v3_unavailable" in engine_used or "synthetiq_redact_v3_config_off" in engine_used:
+        return {
+            "mode": "blocked",
+            "label": "v3 unavailable",
+            "detail": doc.needs_review_reason or "Synthetiq Redact v3 could not run and fallback is off",
+            "engine_used": engine_used,
+            "handwriting_backend": handwriting_backend,
+        }
     if doc.status in {"uploaded", "preprocessing", "ocr", "redaction"}:
         return {
             "mode": "pending",
@@ -2351,6 +2428,19 @@ async def get_document_image(
     return _safe_file_response(path)
 
 
+@app.get("/api/documents/{doc_id}/original-file")
+@app.get("/api/document/{doc_id}/original-file")
+async def get_original_document_file(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Download the original uploaded file for library/archive workflows."""
+    doc = _get_document_or_404(db, doc_id, user)
+    original_name = Path(doc.source_filename or doc.filename or f"document_{doc_id}_original").name
+    return _safe_file_response(doc.original_path, filename=original_name)
+
+
 @app.get("/api/documents/{doc_id}/export")
 @app.get("/api/document/{doc_id}/export")
 async def export_document(
@@ -2397,6 +2487,95 @@ async def export_document(
     db.commit()
     log_action(db, doc.id, "exported", user_id=user.id, details={"type": normalized_type})
     return response
+
+
+def _unique_export_path(folder: Path, filename: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / filename
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    for index in range(2, 1000):
+        candidate = folder / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise HTTPException(status_code=409, detail="Could not create a unique export filename.")
+
+
+def _resolve_download_folder(folder_path: str | None) -> Path:
+    if not folder_path or folder_path.strip().lower() in {"downloads", "default"}:
+        return Path.home() / "Downloads"
+    folder = Path(folder_path).expanduser()
+    if not folder.is_absolute():
+        raise HTTPException(status_code=400, detail="Use an absolute folder path.")
+    folder.mkdir(parents=True, exist_ok=True)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail="Export path must be a folder.")
+    return folder
+
+
+@app.post("/api/documents/{doc_id}/export-to-folder")
+@app.post("/api/document/{doc_id}/export-to-folder")
+async def export_document_to_folder(
+    doc_id: int,
+    type: str = Form("pdf"),
+    folder_path: str = Form(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    """Copy a processed export to a local folder for the desktop app."""
+    doc = _get_document_or_404(db, doc_id, user)
+    normalized_type = "text" if type == "txt" else type
+    folder = _resolve_download_folder(folder_path)
+
+    if normalized_type == "original":
+        raw_path = doc.original_path
+        if not raw_path:
+            raise HTTPException(status_code=404, detail="Original file is not available.")
+        source_path = Path(raw_path)
+        filename = Path(doc.source_filename or doc.filename or source_path.name).name
+    elif normalized_type == "pdf":
+        source_path = Path(_write_burned_redaction_pdf(db, doc))
+        verification = _verify_burned_pdf_export(db, doc, str(source_path))
+        if not verification["passed"]:
+            failed = [check for check in verification["checks"] if not check["passed"]]
+            raise HTTPException(status_code=409, detail={
+                "message": "Burned PDF verification failed. Export blocked.",
+                "checks": failed,
+            })
+        filename = f"document_{doc_id}_redacted.pdf"
+    else:
+        export_map = {
+            "text": (doc.text_export_path, f"document_{doc_id}_redacted.txt"),
+            "clean": (doc.transcription_clean_path, f"document_{doc_id}_clean_transcription.txt"),
+            "json": (doc.transcription_json_path, f"document_{doc_id}_transcription.json"),
+            "docx": (doc.redacted_docx_path, f"document_{doc_id}_redacted.docx"),
+        }
+        if normalized_type not in export_map:
+            raise HTTPException(status_code=400, detail="Unsupported export type.")
+        raw_path, filename = export_map[normalized_type]
+        if not raw_path:
+            raise HTTPException(status_code=404, detail="Requested export is not available.")
+        source_path = Path(raw_path)
+
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Requested export is not available.")
+
+    target_path = _unique_export_path(folder, filename)
+    shutil.copy2(source_path, target_path)
+    doc.status = "exported" if doc.status == "review_approved" else doc.status
+    db.commit()
+    log_action(db, doc.id, "exported_to_folder", user_id=user.id, details={
+        "type": normalized_type,
+        "path": str(target_path),
+    })
+    return {
+        "path": str(target_path),
+        "folder": str(folder),
+        "filename": target_path.name,
+        "type": normalized_type,
+    }
 
 
 @app.post("/api/documents/{doc_id}/verify-export")
@@ -2621,7 +2800,11 @@ async def list_documents(
                 "risk_flags": d.risk_flags,
                 "flag_needs_review": d.flag_needs_review,
                 "redaction_count": len(d.redactions),
+                "engine_used": d.engine_used,
+                "engine_status": _engine_status_payload(d),
+                "needs_review_reason": d.needs_review_reason,
                 "created_at": d.created_at.isoformat() if d.created_at else None,
+                "updated_at": d.updated_at.isoformat() if d.updated_at else None,
             }
             for d in docs
         ],
