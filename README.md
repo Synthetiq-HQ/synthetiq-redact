@@ -103,6 +103,25 @@ Backend health:
 http://127.0.0.1:8000/health
 ```
 
+### Mac SSD Runtime Setup
+
+To keep uploads, processed documents, the SQLite database, and model caches off Mac storage, use the SSD launcher:
+
+```bash
+scripts/setup_mac_ssd.sh
+scripts/run_mac_ssd.sh
+```
+
+By default this uses:
+
+```text
+/Volumes/ZX20/SynthetiqRedact/data
+/Volumes/ZX20/SynthetiqRedact/cache
+/Volumes/ZX20/SynthetiqRedact/models
+```
+
+The setup script writes a local `.env.mac-ssd` file, which is intentionally ignored by Git.
+
 ## Optional Local LLM Setup
 
 The backend can use a local Ollama model named:

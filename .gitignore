@@ -62,6 +62,7 @@ models/
 # Local env files
 backend/.env
 .env.local
+.env.mac-ssd
 
 # Temporary files
 *.tmp

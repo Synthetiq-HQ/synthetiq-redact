@@ -3,12 +3,25 @@ import re
 
 # Directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
-PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
-DB_PATH = os.path.join(DATA_DIR, "db.sqlite3")
+
+
+def _path_from_env(name: str, default: str) -> str:
+    """Resolve a path from env while allowing local relative paths."""
+    value = os.environ.get(name, "").strip()
+    path = value or default
+    return os.path.abspath(os.path.expanduser(path))
+
+
+DATA_DIR = _path_from_env(
+    "SYNTHETIQ_REDACT_DATA_DIR",
+    os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data")),
+)
+UPLOAD_DIR = _path_from_env("UPLOAD_DIR", os.path.join(DATA_DIR, "uploads"))
+PROCESSED_DIR = _path_from_env("PROCESSED_DIR", os.path.join(DATA_DIR, "processed"))
+DB_PATH = _path_from_env("DB_PATH", os.path.join(DATA_DIR, "db.sqlite3"))
 
 # Ensure directories exist
+os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
