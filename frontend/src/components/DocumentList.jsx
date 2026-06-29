@@ -29,7 +29,7 @@ function matchesFilter(doc, filter) {
 function EnginePill({ engineStatus }) {
   if (!engineStatus) return <span className="text-xs text-slate-300">—</span>;
   const cls = engineStatus.mode === 'main'
-    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    ? 'border-amber-200 bg-amber-50 text-amber-800'
     : engineStatus.mode === 'fallback'
       ? 'border-amber-200 bg-amber-50 text-amber-800'
       : engineStatus.mode === 'blocked'

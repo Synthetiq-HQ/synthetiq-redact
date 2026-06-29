@@ -14,6 +14,7 @@ import ReviewQueue from './components/ReviewQueue';
 import BatchDashboard from './components/BatchDashboard';
 import Library from './components/Library';
 import Preferences from './components/Preferences';
+import ProvenanceLookup from './components/ProvenanceLookup';
 import { BrandHomeButton, BrandSplash, BrandWordmark } from './components/Branding';
 import {
   MULTI_USER_AUTH_ENABLED,
@@ -35,6 +36,7 @@ const ICONS = {
   library: 'M4 5h16v14H4zM8 5v14M4 10h16',
   queue: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
   batch: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+  find: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 21l-4.3-4.3',
 };
 
 function RailIcon({ path }) {
@@ -126,6 +128,7 @@ const SCREEN_TITLES = {
   translation: 'Translation',
   routing: 'Routing',
   final: 'Final review',
+  provenance: 'Find ID',
   preferences: 'Account',
 };
 
@@ -266,7 +269,6 @@ function AppContent({ user, onLogout }) {
   const [docId, setDocId] = useState(() => workspaceSeed.docId || null);
   const [docData, setDocData] = useState(null);
   const [progress, setProgress] = useState({ status: '', message: '', percent: 0 });
-  const [showSplash, setShowSplash] = useState(true);
   const [homePulseKey, setHomePulseKey] = useState(0);
 
   useEffect(() => {
@@ -277,11 +279,6 @@ function AppContent({ user, onLogout }) {
       savedAt: new Date().toISOString(),
     });
   }, [screen, docId]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setShowSplash(false), 2700);
-    return () => window.clearTimeout(timer);
-  }, []);
 
   const goHome = () => {
     setHomePulseKey((key) => key + 1);
@@ -326,6 +323,8 @@ function AppContent({ user, onLogout }) {
         return <BatchDashboard {...commonProps} />;
       case 'preferences':
         return <Preferences setScreen={setScreen} />;
+      case 'provenance':
+        return <ProvenanceLookup {...commonProps} />;
       default:
         return <DocumentList {...commonProps} />;
     }
@@ -366,6 +365,8 @@ function AppContent({ user, onLogout }) {
         </div>
 
         <div className="border-t border-slate-800">
+          <RailButton label="Find ID" path={ICONS.find}
+            active={screen === 'provenance'} onClick={() => setScreen('provenance')} />
           <SystemStatus />
           <button
             type="button"
@@ -416,18 +417,41 @@ function AppContent({ user, onLogout }) {
           </>
         )}
       </div>
-      {showSplash && <BrandSplash />}
     </div>
   );
 }
 
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
+  // Wait for the local backend before showing the app, so a cold start shows a
+  // branded loading screen instead of erroring. Capped so it never hangs.
+  const [backendReady, setBackendReady] = useState(false);
+  const [backendSlow, setBackendSlow] = useState(false);
   const [user, setUser] = useState(
     MULTI_USER_AUTH_ENABLED
       ? getStoredUser()
       : { id: 1, email: 'local_user', role: 'admin' }
   );
+
+  useEffect(() => {
+    let active = true;
+    const start = Date.now();
+    const slowTimer = window.setTimeout(() => active && setBackendSlow(true), 8000);
+    const poll = async () => {
+      if (!active) return;
+      try {
+        await getHealth();
+        if (active) setBackendReady(true);
+      } catch {
+        if (!active) return;
+        // Grace cap: after 25s let the user in anyway (the app then retries on its own).
+        if (Date.now() - start > 25000) setBackendReady(true);
+        else window.setTimeout(poll, 1000);
+      }
+    };
+    poll();
+    return () => { active = false; window.clearTimeout(slowTimer); };
+  }, []);
 
   useEffect(() => {
     if (!MULTI_USER_AUTH_ENABLED) {
@@ -467,12 +491,18 @@ export default function App() {
     setUser(null);
   };
 
-  if (!authChecked) {
+  if (!backendReady) {
     return (
-      <div className="flex min-h-[100dvh] items-center justify-center bg-slate-50 text-sm text-slate-500">
-        Loading...
-      </div>
+      <BrandSplash
+        message={backendSlow
+          ? 'Starting the local engine… first launch can take a little longer.'
+          : 'Starting Synthetiq Redact…'}
+      />
     );
+  }
+
+  if (!authChecked) {
+    return <BrandSplash message="Opening Synthetiq Redact..." />;
   }
 
   if (!user) {

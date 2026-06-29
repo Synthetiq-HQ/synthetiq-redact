@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendDir = Join-Path $root "backend"
-$stableAppExe = "C:\Users\INTERPOL\Tools\SynthetiqRedact\synthetiq-redact-v3.1-white-tile-centered.exe"
+$stableAppExe = "C:\Users\INTERPOL\Tools\SynthetiqRedact\synthetiq-redact-v3.1-startup-preview-fix.exe"
 $legacyStableAppExe = "C:\Users\INTERPOL\Tools\SynthetiqRedact\synthetiq-redact.exe"
 $appExe = if (Test-Path $stableAppExe) {
     $stableAppExe
@@ -102,7 +102,9 @@ function Wait-ForHealth {
     }
 
     Write-LauncherLog "Launch requested."
-    $existingApp = Get-Process synthetiq-redact,synthetiq-redact-v3.1-branded -ErrorAction SilentlyContinue | Select-Object -First 1
+    $existingApp = Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessName -like "synthetiq-redact*" } |
+        Select-Object -First 1
     if ($existingApp) {
         Write-LauncherLog "App is already running."
         exit 0

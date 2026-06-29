@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { getSystemStatus, restartLocalBackend } from '../api';
 import {
   getDefaultDownloadPath,
   readDownloadDestinations,
@@ -60,6 +61,7 @@ function StatusCard({ label, value, tone = 'slate' }) {
   const tones = {
     emerald: 'border-emerald-200 bg-emerald-50 text-emerald-900',
     amber: 'border-amber-200 bg-amber-50 text-amber-900',
+    red: 'border-red-200 bg-red-50 text-red-800',
     slate: 'border-slate-200 bg-slate-50 text-slate-700',
   };
 
@@ -81,6 +83,9 @@ export default function Preferences({ setScreen }) {
   const [newPath, setNewPath] = useState('');
   const [dragIndex, setDragIndex] = useState(null);
   const [notice, setNotice] = useState('');
+  const [serviceStatus, setServiceStatus] = useState(null);
+  const [serviceBusy, setServiceBusy] = useState(false);
+  const [serviceError, setServiceError] = useState('');
 
   const showNotice = (message) => {
     setNotice(message);
@@ -108,6 +113,37 @@ export default function Preferences({ setScreen }) {
     writeWorkspacePreferences(next);
     showNotice('Workspace preference saved');
   };
+
+  const refreshServiceStatus = async () => {
+    setServiceBusy(true);
+    setServiceError('');
+    try {
+      setServiceStatus(await getSystemStatus());
+    } catch (err) {
+      setServiceStatus(null);
+      setServiceError(err.response?.data?.detail || err.message || 'Local backend status is unavailable.');
+    } finally {
+      setServiceBusy(false);
+    }
+  };
+
+  const restartBackend = async () => {
+    setServiceBusy(true);
+    setServiceError('');
+    try {
+      const message = await restartLocalBackend();
+      showNotice(message || 'Backend restarted');
+      window.setTimeout(refreshServiceStatus, 1500);
+    } catch (err) {
+      setServiceError(err.message || 'Could not restart the local backend.');
+    } finally {
+      setServiceBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshServiceStatus();
+  }, []);
 
   const savePaths = (nextPaths) => {
     setPaths(nextPaths);
@@ -295,12 +331,63 @@ export default function Preferences({ setScreen }) {
 
           <div className="space-y-4">
             <Section
+              title="Local service"
+              description="Backend online only means the local API is alive. GLM/Ollama readiness is checked separately because that is what controls the main v3 path."
+            >
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <StatusCard
+                    label="Backend"
+                    value={serviceStatus?.backend?.online ? 'Online' : serviceError ? 'Unavailable' : 'Checking...'}
+                    tone={serviceStatus?.backend?.online ? 'emerald' : serviceError ? 'red' : 'slate'}
+                  />
+                  <StatusCard
+                    label="GLM OCR"
+                    value={serviceStatus?.engines?.glm_ocr?.available ? 'Ready' : 'Unavailable'}
+                    tone={serviceStatus?.engines?.glm_ocr?.available ? 'emerald' : 'red'}
+                  />
+                  <StatusCard
+                    label="Watermark"
+                    value={serviceStatus?.watermark?.enabled ? 'Enabled' : 'Disabled'}
+                    tone={serviceStatus?.watermark?.enabled ? 'emerald' : 'amber'}
+                  />
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  <div className="font-bold text-slate-800">
+                    {serviceStatus?.engines?.glm_ocr?.model || 'glm-ocr:latest'}
+                  </div>
+                  <div className="mt-1 break-words">
+                    {serviceError || serviceStatus?.engines?.glm_ocr?.detail || 'Checking local engine status...'}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={refreshServiceStatus}
+                    disabled={serviceBusy}
+                    className="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {serviceBusy ? 'Checking...' : 'Recheck status'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={restartBackend}
+                    disabled={serviceBusy}
+                    className="rounded-md bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    Restart local backend
+                  </button>
+                </div>
+              </div>
+            </Section>
+
+            <Section
               title="Redaction engine"
               description="The main path stays locked to Synthetiq Redact v3 unless you explicitly allow the weaker fallback."
             >
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <StatusCard label="Main path" value="Synthetiq Redact v3" tone="emerald" />
+                  <StatusCard label="Main path" value="Synthetiq Redact v3" tone="amber" />
                   <StatusCard label="Fallback" value={settings.allowOcrFallback ? 'Allowed' : 'Blocked'} tone={settings.allowOcrFallback ? 'amber' : 'emerald'} />
                 </div>
                 <ToggleRow

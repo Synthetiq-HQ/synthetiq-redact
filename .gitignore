@@ -10,8 +10,11 @@ venv/
 ENV/
 
 # Data & uploads
+backend/data/*
+!backend/data/.gitignore
 backend/data/uploads/
 backend/data/processed/
+backend/data/provenance/
 backend/data/*.sqlite3
 backend/data/demo_docs/
 data/uploads/

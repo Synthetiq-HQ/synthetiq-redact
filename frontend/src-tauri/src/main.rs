@@ -3,6 +3,7 @@
 
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent};
 
 /// Holds the spawned Python backend so we can stop it when the app closes.
@@ -73,6 +74,81 @@ fn backend_is_listening() -> bool {
     std::net::TcpStream::connect(("127.0.0.1", 8765)).is_ok()
 }
 
+fn ollama_exe() -> String {
+    if let Ok(p) = std::env::var("OLLAMA_EXE") {
+        return p;
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let candidate = format!("{}\\Programs\\Ollama\\ollama.exe", local);
+        if std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    "ollama".to_string()
+}
+
+fn ollama_is_listening() -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", 11434)).is_ok()
+}
+
+/// Ensure the local Ollama server is running — GLM-OCR (Synthetiq Redact v3)
+/// depends on it. Left running on exit because it is a shared local service.
+fn ensure_ollama() {
+    if ollama_is_listening() {
+        return;
+    }
+    let mut cmd = Command::new(ollama_exe());
+    cmd.arg("serve");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if cmd.spawn().is_ok() {
+        for _ in 0..20 {
+            if ollama_is_listening() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+fn wait_for_backend(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if backend_is_listening() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[cfg(windows)]
+fn stop_backend_on_port() {
+    let script = r#"
+$port = 8765
+$conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($conn) {
+  $owner = $conn.OwningProcess
+  try {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$owner"
+    if ($proc.CommandLine -match "main_v2:app|uvicorn") {
+      Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
+"#;
+    let _ = Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .status();
+}
+
+#[cfg(not(windows))]
+fn stop_backend_on_port() {}
+
 /// Stop the backend if it is running.
 fn kill_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<BackendProcess>() {
@@ -85,14 +161,43 @@ fn kill_backend(app: &tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn restart_backend(app: tauri::AppHandle) -> Result<String, String> {
+    kill_backend(&app);
+    stop_backend_on_port();
+    std::thread::sleep(Duration::from_millis(800));
+
+    let child = spawn_backend().ok_or_else(|| "Could not start the local backend.".to_string())?;
+    if let Some(state) = app.try_state::<BackendProcess>() {
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|_| "Could not update backend process state.".to_string())?;
+        *guard = Some(child);
+    }
+
+    if wait_for_backend(Duration::from_secs(25)) {
+        Ok("Local backend restarted.".to_string())
+    } else {
+        Ok("Backend restart requested; it is still starting.".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(BackendProcess(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![restart_backend])
         .setup(|app| {
             let launcher_managed = std::env::var("SYNTHETIQ_BACKEND_MANAGED").ok().as_deref() == Some("1");
-            let child = if launcher_managed || backend_is_listening() {
+            ensure_ollama();
+            let child = if launcher_managed {
                 None
             } else {
+                // Hard restart: clear any leftover backend from a previous run (even
+                // one that survived a crash or force-quit), then start fresh. This is
+                // why opening the app always gets a clean, working backend.
+                stop_backend_on_port();
+                std::thread::sleep(Duration::from_millis(600));
                 spawn_backend()
             };
             if let Some(state) = app.try_state::<BackendProcess>() {
@@ -103,9 +208,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Synthetiq Redact")
         .run(|app_handle, event| {
-            // When the app fully exits, make sure the backend goes with it.
+            // On close, hard-stop the backend so nothing lingers: kill our spawned
+            // child AND anything still holding the port.
             if let RunEvent::Exit = event {
                 kill_backend(app_handle);
+                stop_backend_on_port();
             }
         });
 }

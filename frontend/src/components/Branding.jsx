@@ -1,7 +1,7 @@
 const BRAND_ICON = '/brand/synthetiq-redact-icon-transparent.png';
 const BRAND_WORDMARK = '/brand/synthetiq-redact-wordmark.png';
 
-export function BrandSplash() {
+export function BrandSplash({ message }) {
   return (
     <div className="brand-splash" aria-label="Launching Synthetiq Redact">
       <div className="brand-splash__stage brand-splash__stage--single">
@@ -14,6 +14,9 @@ export function BrandSplash() {
           <div className="brand-splash__loader" aria-hidden="true">
             <span />
           </div>
+          {message && (
+            <p className="mt-4 text-sm font-medium text-slate-300">{message}</p>
+          )}
         </div>
       </div>
     </div>

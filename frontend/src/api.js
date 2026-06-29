@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { invoke } from '@tauri-apps/api/core';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000';
 const TOKEN_KEY = 'synthetiq_redact_token';
@@ -159,6 +160,37 @@ export async function getDocument(docId) {
 export async function getHealth() {
   // /health is mounted at the API root (not under /api).
   const res = await axios.get(`${API_BASE}/health`, { timeout: 4000 });
+  return res.data;
+}
+
+export async function getSystemStatus() {
+  const res = await api.get('/system/status');
+  return res.data;
+}
+
+export async function restartLocalBackend() {
+  if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+    throw new Error('Backend restart is only available in the desktop app.');
+  }
+  return invoke('restart_backend');
+}
+
+export async function getProvenanceInstance() {
+  const res = await api.get('/provenance/instance');
+  return res.data;
+}
+
+export async function decodeProvenance(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await api.post('/provenance/decode', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return res.data;
+}
+
+export async function lookupProvenance(exportId) {
+  const res = await api.get(`/provenance/${encodeURIComponent(exportId)}`);
   return res.data;
 }
 

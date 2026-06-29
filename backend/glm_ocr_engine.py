@@ -26,6 +26,9 @@ DEFAULT_TIMEOUT = float(os.environ.get("GLM_OCR_TIMEOUT", "180"))
 # so the image fits with room to spare, and cap the output token budget.
 DEFAULT_MAX_SIDE = int(os.environ.get("GLM_OCR_MAX_SIDE", "1280"))
 DEFAULT_NUM_PREDICT = int(os.environ.get("GLM_OCR_NUM_PREDICT", "2048"))
+# Keep the model resident in memory between documents so each one isn't a slow
+# cold start. Ollama unloads after this idle window.
+DEFAULT_KEEP_ALIVE = os.environ.get("GLM_OCR_KEEP_ALIVE", "30m")
 DEFAULT_PROMPT = os.environ.get(
     "GLM_OCR_PROMPT",
     "Transcribe all text in this document image exactly as written, preserving "
@@ -99,6 +102,7 @@ class GLMOCREngine:
                     "prompt": DEFAULT_PROMPT,
                     "images": [b64],
                     "stream": False,
+                    "keep_alive": DEFAULT_KEEP_ALIVE,
                     "options": {"temperature": 0, "num_predict": self.num_predict},
                 },
                 timeout=self.timeout,

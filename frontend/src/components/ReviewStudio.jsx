@@ -119,11 +119,22 @@ function normaliseEngineStatus(status, engineUsed = '') {
 }
 
 function engineBadgeClass(mode) {
-  if (mode === 'main') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
-  if (mode === 'fallback') return 'border-red-200 bg-red-50 text-red-800';
+  // Gold = the best/main engine (Synthetiq Redact v3). Red is reserved for genuine
+  // problems (blocked) so the UI never looks like an error when nothing is wrong.
+  if (mode === 'main') return 'border-amber-300 bg-amber-50 text-amber-800';
+  if (mode === 'fallback') return 'border-orange-300 bg-orange-50 text-orange-800';
   if (mode === 'blocked') return 'border-red-300 bg-red-50 text-red-900';
-  if (mode === 'unknown') return 'border-amber-200 bg-amber-50 text-amber-800';
   return 'border-slate-200 bg-slate-50 text-slate-600';
+}
+
+function noticeClass(message = '') {
+  const text = String(message).toLowerCase();
+  if (text.includes('saved')) return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (text.includes('cached')) return 'border-amber-200 bg-amber-50 text-amber-800';
+  if (text.includes('backend') || text.includes('loading') || text.includes('starting')) {
+    return 'border-blue-200 bg-blue-50 text-blue-700';
+  }
+  return 'border-slate-200 bg-white text-slate-700';
 }
 
 // Short preview of the actual redacted text for the list/legend.
@@ -294,6 +305,41 @@ function renderHighlightedText(text, ranges, onRedactionClick, onSelectText, sel
   return parts;
 }
 
+function PagePreviewSkeleton({ title, message, failed = false }) {
+  return (
+    <div className="flex min-h-full items-start justify-center">
+      <div
+        className="relative w-full max-w-[760px] overflow-hidden rounded-sm bg-white p-8 shadow-sm ring-1 ring-slate-300"
+        style={{ minHeight: 'min(980px, calc(100vh - 190px))' }}
+      >
+        <div className="mb-6 flex items-center gap-2 text-sm font-bold text-slate-800">
+          <span className={`h-2.5 w-2.5 rounded-full ${failed ? 'bg-amber-500' : 'bg-blue-600 animate-pulse'}`} />
+          {title}
+        </div>
+        <div className="space-y-4">
+          <div className="h-5 w-3/5 rounded bg-slate-200 processing-shimmer" />
+          <div className="h-4 w-2/5 rounded bg-slate-200 processing-shimmer" />
+          <div className="h-4 w-1/2 rounded bg-slate-200 processing-shimmer" />
+          <div className="space-y-3 pt-5">
+            <div className="h-4 w-4/5 rounded bg-slate-200 processing-shimmer" />
+            <div className="h-4 w-2/3 rounded bg-slate-200 processing-shimmer" />
+            <div className="h-4 w-3/4 rounded bg-slate-200 processing-shimmer" />
+          </div>
+          <div className="space-y-3 pt-6">
+            <div className="h-4 w-full rounded bg-slate-200 processing-shimmer" />
+            <div className="h-4 w-11/12 rounded bg-slate-200 processing-shimmer" />
+            <div className="h-4 w-10/12 rounded bg-slate-200 processing-shimmer" />
+            <div className="h-4 w-2/3 rounded bg-slate-200 processing-shimmer" />
+          </div>
+        </div>
+        <div className="absolute inset-x-0 bottom-0 border-t border-slate-100 bg-white/90 px-8 py-4 text-xs text-slate-500">
+          {message}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DocumentCanvas({
   title,
   imageUrl,
@@ -319,6 +365,7 @@ function DocumentCanvas({
   clearSelection,
   disabledOverlay,
   liveRedactionPreview = false,
+  previewLoading = false,
   processingActive = false,
   processingMessage = '',
 }) {
@@ -391,6 +438,10 @@ function DocumentCanvas({
   };
 
   const previewUnavailable = !imageUrl || imageFailed;
+  const previewMessage = processingMessage
+    || (previewLoading
+      ? 'Loading the page image from the local backend.'
+      : 'Preview is not ready yet. The editor will refresh it when the backend responds.');
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -581,26 +632,11 @@ function DocumentCanvas({
             )}
             </div>
           ) : (
-            <div className="relative overflow-hidden rounded-md border border-slate-300 bg-white p-8 text-sm text-slate-600">
-            {processingActive ? (
-              <>
-                <div className="mb-3 flex items-center gap-2 font-semibold text-blue-900">
-                  <span className="h-2.5 w-2.5 rounded-full bg-blue-600 animate-pulse" />
-                  Preparing page preview
-                </div>
-                <div className="space-y-2">
-                  <div className="h-3 w-2/3 rounded bg-slate-200 processing-shimmer" />
-                  <div className="h-3 w-1/2 rounded bg-slate-200 processing-shimmer" />
-                  <div className="h-3 w-3/4 rounded bg-slate-200 processing-shimmer" />
-                </div>
-                <div className="mt-4 text-xs text-slate-500">
-                  {processingMessage || 'Rendering the uploaded document into the review workspace.'}
-                </div>
-              </>
-            ) : (
-              'Preview image is not available.'
-            )}
-            </div>
+            <PagePreviewSkeleton
+              title={processingActive || previewLoading ? 'Preparing page preview' : 'Waiting for page preview'}
+              message={previewMessage}
+              failed={imageFailed && !previewLoading && !processingActive}
+            />
           )}
         </div>
         {disabledOverlay && (
@@ -636,6 +672,7 @@ export default function ReviewStudio({ docId, setScreen }) {
   const [error, setError] = useState('');
   const [imageUrls, setImageUrls] = useState({});
   const [imageSizes, setImageSizes] = useState({});
+  const [imagesLoading, setImagesLoading] = useState(false);
   const [imageRevision, setImageRevision] = useState(0);
   const [viewMode, setViewMode] = useState('both');
   const [zoom, setZoom] = useState(0.75);
@@ -727,6 +764,7 @@ export default function ReviewStudio({ docId, setScreen }) {
     ),
     [documentData?.engine_status, documentData?.engine_used, processingProgress?.engine_status, processingProgress?.engine_used]
   );
+  const progressPercent = processingFailed ? 100 : (processingProgress?.percent ?? 5);
 
   const loadDocument = useCallback(async () => {
     setError('');
@@ -890,26 +928,32 @@ export default function ReviewStudio({ docId, setScreen }) {
     // boxes. Keep the original image mounted so edits never require a PNG reload.
     const modes = ['original'];
     setImageUrls({});
+    setImageSizes({});
+    setImagesLoading(true);
 
     async function loadImages() {
       const next = {};
-      await Promise.all(modes.map(async (mode) => {
-        try {
-          let url;
+      try {
+        await Promise.all(modes.map(async (mode) => {
           try {
-            url = currentPage?.page_number
-              ? await getPageImageBlobUrl(docId, currentPage.page_number, mode)
-              : await getImageBlobUrl(docId, mode);
-          } catch (pageError) {
-            url = await getImageBlobUrl(docId, mode);
+            let url;
+            try {
+              url = currentPage?.page_number
+                ? await getPageImageBlobUrl(docId, currentPage.page_number, mode)
+                : await getImageBlobUrl(docId, mode);
+            } catch (pageError) {
+              url = await getImageBlobUrl(docId, mode);
+            }
+            objectUrls.push(url);
+            next[mode] = url;
+          } catch {
+            next[mode] = null;
           }
-          objectUrls.push(url);
-          next[mode] = url;
-        } catch {
-          next[mode] = null;
-        }
-      }));
-      if (active) setImageUrls(next);
+        }));
+        if (active) setImageUrls(next);
+      } finally {
+        if (active) setImagesLoading(false);
+      }
     }
 
     loadImages();
@@ -1399,6 +1443,10 @@ export default function ReviewStudio({ docId, setScreen }) {
     if (target) setCurrentPageNumber(target.page_number);
   };
 
+  const previewLoadingMessage = imagesLoading
+    ? 'Loading the page image from the local backend.'
+    : (processingProgress?.message || 'Preview is not ready yet. The editor will refresh it when the backend responds.');
+
   const originalCanvas = (
     <DocumentCanvas
       title="Original"
@@ -1424,8 +1472,9 @@ export default function ReviewStudio({ docId, setScreen }) {
       startEdit={startEdit}
       clearSelection={clearReviewSelection}
       disabledOverlay={false}
+      previewLoading={imagesLoading}
       processingActive={Boolean(activeProcessing)}
-      processingMessage={processingProgress?.message}
+      processingMessage={previewLoadingMessage}
     />
   );
 
@@ -1452,8 +1501,9 @@ export default function ReviewStudio({ docId, setScreen }) {
       startEdit={() => {}}
       clearSelection={clearReviewSelection}
       disabledOverlay={drawMode && viewMode === 'both'}
+      previewLoading={imagesLoading}
       processingActive={Boolean(activeProcessing)}
-      processingMessage={processingProgress?.message}
+      processingMessage={previewLoadingMessage}
     />
   );
 
@@ -1664,18 +1714,36 @@ export default function ReviewStudio({ docId, setScreen }) {
               </span>
             </div>
             <span className={processingFailed ? 'text-red-700' : 'text-blue-800'}>
-              {processingProgress?.percent ?? 5}%
+              {progressPercent}%
             </span>
           </div>
           <div className={`h-2 overflow-hidden rounded-full ${processingFailed ? 'bg-red-100' : 'bg-blue-100'}`}>
             <div
               className={`h-full rounded-full transition-all duration-500 ${processingFailed ? 'bg-red-500' : 'bg-blue-600 progress-striped'}`}
-              style={{ width: `${processingProgress?.percent ?? 5}%` }}
+              style={{ width: `${progressPercent}%` }}
             />
           </div>
           <div className={`mt-2 text-xs ${processingFailed ? 'text-red-700' : 'text-blue-800'}`}>
             {processingProgress?.message || documentData?.needs_review_reason || 'Preparing the review workspace...'}
           </div>
+          {processingFailed && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setScreen('preferences')}
+                className="rounded-md bg-red-700 px-3 py-2 text-xs font-bold text-white hover:bg-red-800"
+              >
+                Open engine settings
+              </button>
+              <button
+                type="button"
+                onClick={() => setScreen('scan')}
+                className="rounded-md border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50"
+              >
+                Upload again
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1726,7 +1794,7 @@ export default function ReviewStudio({ docId, setScreen }) {
 
         <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-200 p-4">
           {notice && (
-            <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            <div className={`mb-3 rounded-md border px-4 py-3 text-sm ${noticeClass(notice)}`}>
               {notice}
             </div>
           )}

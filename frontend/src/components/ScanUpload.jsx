@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { uploadDocument } from '../api';
-import { readProcessingSettings } from '../cache';
+import { readProcessingSettings, writeProcessingSettings } from '../cache';
 
 const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.pdf', '.docx', '.gif', '.bmp', '.tiff', '.tif'];
 const ACCEPTED_INPUT = 'image/png,image/jpeg,image/gif,image/bmp,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.png,.jpg,.jpeg,.pdf,.docx,.gif,.bmp,.tiff,.tif';
@@ -14,6 +14,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
   const [cameraActive, setCameraActive] = useState(false);
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
+  const [processingSettings, setProcessingSettings] = useState(() => readProcessingSettings());
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -124,7 +125,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
     setError(null);
     setProgress({ status: 'uploaded', message: 'Uploading...', percent: 5 });
     try {
-      const result = await uploadDocument(file, translateEnabled, selectedCategory, readProcessingSettings());
+      const result = await uploadDocument(file, translateEnabled, selectedCategory, processingSettings);
       if (result?.document_id) {
         setDocId(result.document_id);
         setScreen('review');
@@ -135,7 +136,14 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
       setError(err.message || 'Upload failed.');
       setIsUploading(false);
     }
-  }, [file, translateEnabled, selectedCategory, setDocId, setScreen, setProgress]);
+  }, [file, translateEnabled, selectedCategory, processingSettings, setDocId, setScreen, setProgress]);
+
+  const enableFallback = useCallback(() => {
+    const next = { ...processingSettings, allowOcrFallback: true };
+    setProcessingSettings(next);
+    writeProcessingSettings(next);
+    setError(null);
+  }, [processingSettings]);
 
   return (
     <div className="flex flex-col gap-6 py-4">
@@ -186,9 +194,16 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
       {/* Upload controls */}
       {!cameraActive && !file && (
         <div className="space-y-3">
-          <button
-            type="button"
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
@@ -199,7 +214,7 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
             <span className="text-base font-semibold text-slate-900">Drop a file here or click to choose</span>
             <span className="mt-2 text-sm text-slate-500">PNG, JPG, TIFF, GIF, BMP, PDF, or Word .docx</span>
             <span className="mt-4 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Choose file</span>
-          </button>
+          </div>
           <input ref={fileInputRef} type="file" accept={ACCEPTED_INPUT} onChange={handleFileSelect} className="sr-only" />
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -212,6 +227,22 @@ export default function ScanUpload({ setScreen, setDocId, setDocData, setProgres
               Use camera
             </button>
           </div>
+        </div>
+      )}
+
+      {!cameraActive && !processingSettings.allowOcrFallback && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="font-bold">Fallback OCR is blocked.</div>
+          <div className="mt-1 text-xs leading-5">
+            This keeps the main Synthetiq Redact v3 path strict. If GLM/Ollama is unavailable, this upload will fail instead of using the weaker fallback.
+          </div>
+          <button
+            type="button"
+            onClick={enableFallback}
+            className="mt-3 rounded-md bg-amber-600 px-3 py-2 text-xs font-bold text-white hover:bg-amber-700"
+          >
+            Allow fallback for uploads
+          </button>
         </div>
       )}
 

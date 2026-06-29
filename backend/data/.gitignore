@@ -1,0 +1,4 @@
+# Local-only provenance data: server instance secret + export library.
+# Never commit — these are per-install and contain the signing secret.
+*
+!.gitignore

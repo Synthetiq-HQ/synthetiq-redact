@@ -68,6 +68,8 @@ DEFAULT_COUNCIL_NAME = os.environ.get("DEFAULT_COUNCIL_NAME", "Pilot Council")
 ENABLE_MULTI_USER_AUTH = os.environ.get("ENABLE_MULTI_USER_AUTH", "0") == "1"
 LOCAL_USER_EMAIL = os.environ.get("LOCAL_USER_EMAIL", "local_user@synthetiq.local")
 WEBHOOKS_ENABLED = os.environ.get("ENABLE_WEBHOOKS", "0") == "1"
+# Burn a local-only machine-readable provenance watermark into redacted exports.
+WATERMARK_ENABLED = os.environ.get("WATERMARK_ENABLED", "1") == "1"
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
@@ -569,6 +571,32 @@ def _write_burned_redaction_pdf(db: Session, doc: Document) -> str:
     out_path = out_folder / "redacted_document.pdf"
     if not images:
         raise HTTPException(status_code=404, detail="No pages are available for PDF export")
+
+    # Optional local provenance watermark burned into each page (never breaks export).
+    export_record = None
+    if WATERMARK_ENABLED:
+        try:
+            from provenance import get_provenance_store, file_sha256
+            import watermark as wm
+
+            store = get_provenance_store()
+            export_record = store.create_export(
+                document_id=doc.id,
+                filename=doc.filename,
+                user_id=doc.reviewer_id or doc.uploaded_by,
+                original_hash=file_sha256(doc.original_path) if doc.original_path else None,
+                engine_used=doc.engine_used,
+                page_count=len(images),
+            )
+            images, positions = wm.embed_in_images(images, export_record["export_id"])
+            store.update_export(export_record["export_id"], watermark_positions=positions)
+        except Exception:
+            export_record = None  # provenance is best-effort; export must still succeed
+
+    # Embed the provenance id directly via PIL's keywords field — keeps the
+    # producer/creator generic so the safety verifier still passes (writing it
+    # later with PyMuPDF stamped a non-generic producer and failed verification).
+    keywords = export_record["export_id"] if export_record else ""
     first, rest = images[0], images[1:]
     first.save(
         out_path,
@@ -579,10 +607,19 @@ def _write_burned_redaction_pdf(db: Session, doc: Document) -> str:
         title="",
         author="",
         subject="",
-        keywords="",
+        keywords=keywords,
         creator="Synthetiq Redact",
         producer="Synthetiq Redact",
     )
+
+    if export_record:
+        try:
+            from provenance import get_provenance_store, file_sha256
+            get_provenance_store().update_export(
+                export_record["export_id"], redacted_hash=file_sha256(str(out_path))
+            )
+        except Exception:
+            pass
     return str(out_path)
 
 
@@ -642,6 +679,9 @@ def _verify_burned_pdf_export(db: Session, doc: Document, pdf_path: str) -> dict
             filename_markers = [marker for marker in (doc.filename, doc.source_filename) if marker]
             contains_source_name = any(marker in text_value for marker in filename_markers)
             if key in allowed_metadata_keys and not contains_source_name:
+                continue
+            # Local provenance id in /Keywords is an allowed, non-identifying signal.
+            if key == "/Keywords" and text_value.upper().startswith("SRD-"):
                 continue
             if text_value not in {"Synthetiq Redact"}:
                 unsafe_metadata.append(key)
@@ -2844,6 +2884,144 @@ async def get_document_audit(
             }
             for entry in entries
         ],
+    }
+
+
+# ============================================================================
+# PROVENANCE / WATERMARK LOOKUP (local-only)
+# ============================================================================
+
+PROVENANCE_IMAGE_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif"}
+
+
+def _provenance_document_payload(db: Session, user: User, record: dict) -> Optional[dict]:
+    """Resolve the originating document (within the user's council) for a record."""
+    doc_id = record.get("document_id")
+    if not doc_id:
+        return None
+    user = _ensure_user_council(db, user)
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc or (doc.council_id is not None and doc.council_id != user.council_id):
+        return {"id": doc_id, "accessible": False}
+    return {
+        "id": doc.id,
+        "accessible": True,
+        "filename": doc.filename,
+        "status": doc.status,
+        "engine_used": doc.engine_used,
+        "openable": doc.status in ("complete", "needs_review", "in_review", "review_approved", "exported"),
+    }
+
+
+@app.get("/api/provenance/instance")
+async def provenance_instance(user: User = Depends(get_current_user)):
+    """Return this server's local provenance instance (id + short id)."""
+    from provenance import get_provenance_store
+    return get_provenance_store().instance_info()
+
+
+@app.post("/api/provenance/decode")
+async def provenance_decode(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Decode a provenance watermark from an uploaded redacted PDF/image."""
+    from provenance import get_provenance_store
+    import tempfile
+    import watermark as wm
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in PROVENANCE_IMAGE_EXTS:
+        raise HTTPException(status_code=400, detail="Upload a redacted PDF or image file")
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+            tf.write(content)
+            tmp_path = tf.name
+        export_id = wm.decode_any(tmp_path)
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    if not export_id:
+        return {
+            "status": "unreadable",
+            "message": "No Synthetiq Redact watermark could be read. It may belong to "
+                       "another server, or the mark was cropped/too low quality.",
+        }
+
+    result = get_provenance_store().decode_result(export_id)
+    if result.get("status") == "found":
+        result["document"] = _provenance_document_payload(db, user, result["record"])
+    return result
+
+
+@app.get("/api/provenance/{export_id}")
+async def provenance_lookup(
+    export_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Look up a provenance/export id in this server's local library."""
+    from provenance import get_provenance_store
+    result = get_provenance_store().decode_result(export_id)
+    if result.get("status") == "found":
+        result["document"] = _provenance_document_payload(db, user, result["record"])
+    return result
+
+
+@app.get("/api/system/status")
+async def system_status():
+    """Local desktop service status, including the GLM/Ollama engine readiness."""
+    glm_status = {
+        "host": os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/"),
+        "model": os.environ.get("GLM_OCR_MODEL", "glm-ocr:latest"),
+        "available": False,
+        "detail": "Not checked",
+    }
+    try:
+        import requests
+
+        response = requests.get(f"{glm_status['host']}/api/tags", timeout=1.5)
+        if response.status_code == 200:
+            names = [model.get("name", "") for model in response.json().get("models", [])]
+            target = glm_status["model"]
+            target_base = target.split(":")[0]
+            glm_status["available"] = any(
+                target == name or name.split(":")[0] == target_base
+                for name in names
+            )
+            glm_status["detail"] = (
+                "Ready" if glm_status["available"]
+                else f"Ollama is running, but {target} is not installed"
+            )
+            glm_status["installed_models"] = names
+        else:
+            glm_status["detail"] = f"Ollama returned HTTP {response.status_code}"
+    except Exception as exc:
+        glm_status["detail"] = f"Ollama is not reachable: {exc}"
+
+    return {
+        "backend": {
+            "online": True,
+            "version": "2.0.0",
+            "local_mode": not ENABLE_MULTI_USER_AUTH,
+        },
+        "engines": {
+            "glm_ocr": glm_status,
+            "fallback_default_allowed": os.environ.get("ALLOW_OCR_GEOMETRY_FALLBACK", "0") == "1",
+        },
+        "watermark": {
+            "enabled": WATERMARK_ENABLED,
+        },
     }
 
 
