@@ -1,7 +1,7 @@
 # Synthetiq Redact
 
 <p align="center">
-  <img src="frontend/public/brand/synthetiq-redact-wordmark.png" alt="Synthetiq Redact" width="520" />
+  <img src="frontend/public/brand/synthetiq-redact-logo-white-bg.png" alt="Synthetiq Redact" width="520" />
 </p>
 
 <p align="center">
